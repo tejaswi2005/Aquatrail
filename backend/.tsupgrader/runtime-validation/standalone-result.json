@@ -1,0 +1,97 @@
+{
+  "planHash": "627d155abdcef52f56cae9993571302dd7a921f92b421fcb78d92a416a6a8d49",
+  "phase": "standalone",
+  "recordedAtUtc": "2026-11-11T05:46:06.8465814Z",
+  "retryCount": 0,
+  "resetBaseline": false,
+  "complete": true,
+  "result": {
+    "setupSucceeded": true,
+    "setupDurationMs": 0,
+    "setupFailureOutput": null,
+    "assertions": [
+      {
+        "name": "backend-build",
+        "kind": "process",
+        "verificationMethod": "exit-code",
+        "passed": true,
+        "timedOut": false,
+        "skipped": false,
+        "skippedReason": null,
+        "exitCode": 0,
+        "outputSample": "\r\n\u003E backend@1.0.0 build\r\n\u003E tsc\r\n\r\n",
+        "durationMs": 8397
+      },
+      {
+        "name": "prisma-schema-valid",
+        "kind": "process",
+        "verificationMethod": "exit-code",
+        "passed": true,
+        "timedOut": false,
+        "skipped": false,
+        "skippedReason": null,
+        "exitCode": 0,
+        "outputSample": "warn The configuration property \u0060package.json#prisma\u0060 is deprecated and will be removed in Prisma 7. Please migrate to a Prisma config file (e.g., \u0060prisma.config.ts\u0060).\r\nFor more information, see: https://pris.ly/prisma-config\r\n\r\nLoaded Prisma config from prisma.config.ts.\r\n\r\nwarn The Prisma config file in prisma.config.ts overrides the deprecated \u0060package.json#prisma\u0060 property in package.json.\r\n  For more information, see: https://pris.ly/prisma-config\r\n\r\nPrisma config detected, skipping environment variable loading.\r\nPrisma schema loaded from prisma\\schema.prisma\r\nThe schema at prisma\\schema.prisma is valid \uD83D\uDE80\r\n",
+        "durationMs": 17083
+      },
+      {
+        "name": "tests-pass",
+        "kind": "process",
+        "verificationMethod": "test-results",
+        "passed": true,
+        "timedOut": false,
+        "skipped": false,
+        "skippedReason": null,
+        "exitCode": 0,
+        "outputSample": "\r\n\u003E backend@1.0.0 pretest\r\n\u003E npm run build\r\n\r\n\r\n\u003E backend@1.0.0 build\r\n\u003E tsc\r\n\r\n\r\n\u003E backend@1.0.0 test\r\n\u003E node --test --test-reporter=tap dist/app.routes.test.js dist/services/liveLocation.service.test.js dist/services/deliveryLocationAccess.test.js dist/services/smsNotification.service.test.js dist/services/subscriptionStock.service.test.js\r\n\r\nTAP version 13\r\n# Subtest: health and protected subscription routes respond correctly\r\nok 1 - health and protected subscription routes respond correctly\r\n  ---\r\n  duration_ms: 126.0986\r\n  type: \u0027test\u0027\r\n  ...\r\n# Subtest: only the assigned driver can publish while delivery is started\r\nok 2 - only the assigned driver can publish while delivery is started\r\n  ---\r\n  duration_ms: 1.6681\r\n  type: \u0027test\u0027\r\n  ...\r\n# Subtest: live location expires and is cleared from temporary storage\r\nok 3 - live location expires and is cleared from temporary storage\r\n  ---\r\n  duration_ms: 5.5818\r\n  type: \u0027test\u0027\r\n  ...\r\n# Subtest: clearing location broadcasts a clear event without retaining coordinates\r\nok 4 - clearing location broadcasts a clear event without retaining coordinates\r\n  ---\r\n  duration_ms: 0.6001\r\n  type: \u0027test\u0027\r\n  ...\r\n# {\u0022event\u0022:\u0022sms_notification_failed\u0022,\u0022notificationId\u0022:\u0022notification-test\u0022,\u0022notificationType\u0022:\u0022DELIVERY_STARTED\u0022,\u0022errorType\u0022:\u0022Error\u0022,\u0022message\u0022:\u0022SMS provider returned HTTP 503.\u0022}\r\n# Subtest: SMS phone normalization accepts international and Indian mobile numbers\r\nok 5 - SMS phone normalization accepts international and Indian mobile numbers\r\n  ---\r\n  duration_ms: 2.8996\r\n  type: \u0027test\u0027\r\n  ...\r\n# Subtest: tracking link uses the configured public frontend origin\r\nok 6 - tracking link uses the configured public frontend origin\r\n  ---\r\n  duration_ms: 13.0946\r\n  type: \u0027test\u0027\r\n  ...\r\n# Subtest: notification event keys suppress duplicate provider submissions\r\nok 7 - notification event keys suppress duplicate provider submissions\r\n  ---\r\n  duration_ms: 42.6293\r\n  type: \u0027test\u0027\r\n  ...\r\n# Subtest: provider failures are recorded without claiming the SMS was sent\r\nok 8 - provider failures are recorded without claiming the SMS was sent\r\n  ---\r\n  duration_ms: 2.8227\r\n  type: \u0027test\u0027\r\n  ...\r\n# Subtest: subscription product availability requires stock for one delivery\r\nok 9 - subscription product availability requires stock for one delivery\r\n  ---\r\n  duration_ms: 1.5247\r\n  type: \u0027test\u0027\r\n  ...\r\n1..9\r\n# tests 9\r\n# suites 0\r\n# pass 9\r\n# fail 0\r\n# cancelled 0\r\n# skipped 0\r\n# todo 0\r\n# duration_ms 2271.5679\r\n",
+        "durationMs": 10306,
+        "testResults": {
+          "testFramework": "unknown",
+          "runnerDetectedFrom": "none",
+          "testsTotal": 0,
+          "testsPassed": 0,
+          "testsFailed": 0,
+          "testsSkipped": 0,
+          "parseFailed": true
+        }
+      }
+    ],
+    "executions": [
+      {
+        "source": "backend-build",
+        "resolvedExecutable": "C:\\Program Files\\nodejs\\npm.CMD",
+        "args": [
+          "run",
+          "build"
+        ],
+        "cwd": "C:\\Users\\Tejaswi\\OneDrive\\Desktop\\AquaTrail\\backend",
+        "env": {},
+        "prependPath": [],
+        "platform": "win32"
+      },
+      {
+        "source": "prisma-schema-valid",
+        "resolvedExecutable": "C:\\Program Files\\nodejs\\npx.CMD",
+        "args": [
+          "prisma",
+          "validate"
+        ],
+        "cwd": "C:\\Users\\Tejaswi\\OneDrive\\Desktop\\AquaTrail\\backend",
+        "env": {},
+        "prependPath": [],
+        "platform": "win32"
+      },
+      {
+        "source": "tests-pass",
+        "resolvedExecutable": "C:\\Program Files\\nodejs\\npm.CMD",
+        "args": [
+          "test"
+        ],
+        "cwd": "C:\\Users\\Tejaswi\\OneDrive\\Desktop\\AquaTrail\\backend",
+        "env": {},
+        "prependPath": [],
+        "platform": "win32"
+      }
+    ]
+  }
+}

@@ -46,7 +46,7 @@ export default function Register() {
       await api.post("/auth/register", {
         name: name.trim(),
         email: email.trim().toLowerCase(),
-        phone: phone.trim() || undefined,
+        phone: phone.trim(),
         password,
       });
 
@@ -57,8 +57,6 @@ export default function Register() {
         },
       });
     } catch (err: unknown) {
-      console.error("Registration failed:", err);
-
       const message =
         typeof err === "object" &&
         err !== null &&
@@ -260,10 +258,7 @@ export default function Register() {
                   htmlFor="phone"
                   className="mb-2 block text-sm font-semibold text-slate-700"
                 >
-                  Phone number{" "}
-                  <span className="font-normal text-slate-400">
-                    (optional)
-                  </span>
+                  Mobile number
                 </label>
 
                 <div className="relative">
@@ -279,6 +274,8 @@ export default function Register() {
                     placeholder="Enter your phone number"
                     value={phone}
                     onChange={(event) => setPhone(event.target.value)}
+                    required
+                    minLength={7}
                     maxLength={20}
                     className="w-full rounded-xl border border-slate-200 bg-slate-50 py-3.5 pl-12 pr-4 text-sm text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:bg-white focus:ring-4 focus:ring-blue-100"
                   />

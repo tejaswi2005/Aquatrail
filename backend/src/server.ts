@@ -1,14 +1,23 @@
+
 import "dotenv/config";
 import http from "node:http";
 import jwt from "jsonwebtoken";
 import { Server } from "socket.io";
 import { z } from "zod";
+import { DeliveryStatus } from "@prisma/client";
 
 import { createApp } from "./app.js";
 import { prisma } from "./config/prisma.js";
+import {
+  getLiveLocation,
+  setLiveLocation,
+  clearLiveLocation,
+  setLocationClearBroadcaster,
+  canPublishDeliveryLocation,
+} from "./services/liveLocation.service.js";
+import { startSubscriptionScheduler } from "./services/subscriptionScheduler.service.js";
 
 const PORT = Number(process.env.PORT) || 5000;
-
 const app = createApp();
 const httpServer = http.createServer(app);
 
@@ -20,9 +29,17 @@ if (!JWT_SECRET) {
 
 const io = new Server(httpServer, {
   cors: {
-    origin: process.env.FRONTEND_URL || "http://localhost:5173",
+    origin:
+      process.env.FRONTEND_URL || "http://localhost:5173",
     methods: ["GET", "POST"],
   },
+});
+
+setLocationClearBroadcaster((deliveryId) => {
+  io.to(`delivery:${deliveryId}`).emit(
+    "delivery:location:cleared",
+    deliveryId
+  );
 });
 
 interface SocketUser {
@@ -47,7 +64,7 @@ const locationSchema = z.object({
   accuracy: z.number().finite().min(0).optional(),
 });
 
-// Authenticate socket connections.
+// Authenticate every Socket.IO connection.
 io.use((socket, next) => {
   try {
     const token = socket.handshake.auth?.token;
@@ -64,6 +81,7 @@ io.use((socket, next) => {
 
     const claims = decoded as jwt.JwtPayload & {
       id?: string;
+      sub?: string;
       role?: string;
     };
 
@@ -71,7 +89,9 @@ io.use((socket, next) => {
 
     if (
       !userId ||
-      !["OWNER", "DRIVER", "CUSTOMER"].includes(claims.role ?? "")
+      !["OWNER", "DRIVER", "CUSTOMER"].includes(
+        claims.role ?? ""
+      )
     ) {
       return next(new Error("Invalid authentication token."));
     }
@@ -90,7 +110,7 @@ io.use((socket, next) => {
 io.on("connection", (socket) => {
   console.log(`Authenticated socket connected: ${socket.id}`);
 
-  // Customer or assigned driver subscribes to a specific delivery.
+  // Customer or assigned driver subscribes to a delivery.
   socket.on("delivery:subscribe", async (payload, acknowledge) => {
     const parsed = subscribeSchema.safeParse(payload);
 
@@ -104,9 +124,7 @@ io.on("connection", (socket) => {
 
     try {
       const delivery = await prisma.delivery.findUnique({
-        where: {
-          id: parsed.data.deliveryId,
-        },
+        where: { id: parsed.data.deliveryId },
         include: {
           order: {
             include: {
@@ -143,25 +161,22 @@ io.on("connection", (socket) => {
         return;
       }
 
+      if (delivery.status !== DeliveryStatus.STARTED) {
+        acknowledge?.({
+          success: false,
+          message: "Live location is only available during an active delivery.",
+        });
+        return;
+      }
+
+      // Subscribe only after authorization succeeds.
       await socket.join(`delivery:${delivery.id}`);
 
-      // Send the latest saved location immediately.
-      const latestLocation = await prisma.driverLocation.findFirst({
-        where: {
-          deliveryId: delivery.id,
-        },
-        orderBy: {
-          recordedAt: "desc",
-        },
-      });
+      // Send the latest in-memory location, if available.
+      const latestLocation = getLiveLocation(delivery.id);
 
       if (latestLocation) {
-        socket.emit("delivery:location", {
-          deliveryId: delivery.id,
-          latitude: latestLocation.latitude,
-          longitude: latestLocation.longitude,
-          timestamp: latestLocation.recordedAt.toISOString(),
-        });
+        socket.emit("delivery:location", latestLocation);
       }
 
       acknowledge?.({
@@ -178,14 +193,25 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Only the driver assigned to a delivery can publish its location.
-  socket.on("delivery:location:update", async (payload, acknowledge) => {
-    const parsed = locationSchema.safeParse(payload);
+
+  // Leave a delivery room when the customer exits tracking.
+socket.on("delivery:unsubscribe", (payload) => {
+  const parsed = subscribeSchema.safeParse(payload);
+
+  if (!parsed.success) {
+    return;
+  }
+
+  socket.leave(`delivery:${parsed.data.deliveryId}`);
+});
+
+  socket.on("delivery:location:stop", async (payload, acknowledge) => {
+    const parsed = subscribeSchema.safeParse(payload);
 
     if (!parsed.success) {
       acknowledge?.({
         success: false,
-        message: "Invalid location coordinates.",
+        message: "Invalid delivery ID.",
       });
       return;
     }
@@ -196,18 +222,14 @@ io.on("connection", (socket) => {
       if (user.role !== "DRIVER") {
         acknowledge?.({
           success: false,
-          message: "Only drivers can update delivery locations.",
+          message: "Only drivers can stop location sharing.",
         });
         return;
       }
 
       const delivery = await prisma.delivery.findUnique({
-        where: {
-          id: parsed.data.deliveryId,
-        },
-        include: {
-          driver: true,
-        },
+        where: { id: parsed.data.deliveryId },
+        include: { driver: true },
       });
 
       if (!delivery || delivery.driver?.userId !== user.id) {
@@ -218,49 +240,101 @@ io.on("connection", (socket) => {
         return;
       }
 
-      if (
-        ["DELIVERED", "FAILED", "CANCELLED"].includes(delivery.status)
-      ) {
+      clearLiveLocation(delivery.id);
+      acknowledge?.({ success: true });
+    } catch (error) {
+      console.error("Stopping driver location sharing failed:", error);
+
+      acknowledge?.({
+        success: false,
+        message: "Unable to stop location sharing.",
+      });
+    }
+  });
+
+  // Only the assigned driver can publish GPS coordinates.
+  socket.on(
+    "delivery:location:update",
+    async (payload, acknowledge) => {
+      const parsed = locationSchema.safeParse(payload);
+
+      if (!parsed.success) {
         acknowledge?.({
           success: false,
-          message: "This delivery is no longer active.",
+          message: "Invalid location coordinates.",
         });
         return;
       }
 
-      const savedLocation = await prisma.driverLocation.create({
-        data: {
+      try {
+        const user = socket.data.user;
+
+        if (user.role !== "DRIVER") {
+          acknowledge?.({
+            success: false,
+            message: "Only drivers can update delivery locations.",
+          });
+          return;
+        }
+
+        const delivery = await prisma.delivery.findUnique({
+          where: { id: parsed.data.deliveryId },
+          include: { driver: true },
+        });
+
+        if (!delivery || delivery.driver?.userId !== user.id) {
+          acknowledge?.({
+            success: false,
+            message: "This delivery is not assigned to you.",
+          });
+          return;
+        }
+
+        if (
+          !canPublishDeliveryLocation({
+            role: user.role,
+            userId: user.id,
+            assignedDriverUserId: delivery.driver?.userId ?? null,
+            deliveryStatus: delivery.status,
+          })
+        ) {
+          acknowledge?.({
+            success: false,
+            message: "Location can only be shared during an active delivery.",
+          });
+          return;
+        }
+
+        // Keep only the latest location in server memory.
+        const update = {
           deliveryId: delivery.id,
           latitude: parsed.data.latitude,
           longitude: parsed.data.longitude,
-          accuracy: parsed.data.accuracy,
-        },
-      });
+          ...(parsed.data.accuracy !== undefined && {
+            accuracy: parsed.data.accuracy,
+          }),
+          timestamp: new Date().toISOString(),
+        };
 
-      const update = {
-        deliveryId: delivery.id,
-        latitude: savedLocation.latitude,
-        longitude: savedLocation.longitude,
-        timestamp: savedLocation.recordedAt.toISOString(),
-      };
+        setLiveLocation(update);
 
-      io.to(`delivery:${delivery.id}`).emit(
-        "delivery:location",
-        update
-      );
+        // Notify only authorized subscribers in this delivery room.
+        io.to(`delivery:${delivery.id}`).emit(
+          "delivery:location",
+          update
+        );
 
-      acknowledge?.({
-        success: true,
-      });
-    } catch (error) {
-      console.error("Driver location update failed:", error);
+        acknowledge?.({ success: true });
+      } catch (error) {
+        console.error("Driver location update failed:", error);
 
-      acknowledge?.({
-        success: false,
-        message: "Unable to save the location update.",
-      });
+        acknowledge?.({
+          success: false,
+          message: "Unable to process the location update.",
+        });
+      }
     }
-  });
+  );
 
   socket.on("disconnect", () => {
     console.log(`Socket disconnected: ${socket.id}`);
@@ -269,4 +343,14 @@ io.on("connection", (socket) => {
 
 httpServer.listen(PORT, () => {
   console.log(`AquaTrail server running on port ${PORT}`);
+  try {
+    startSubscriptionScheduler();
+  } catch (error: unknown) {
+    console.error(
+      JSON.stringify({
+        event: "subscription_scheduler_start_failed",
+        errorType: error instanceof Error ? error.name : "unknown",
+      })
+    );
+  }
 });

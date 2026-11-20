@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   Droplets,
   Eye,
@@ -11,10 +11,86 @@ import {
 } from "lucide-react";
 
 import { api } from "../services/api";
-import { saveSession } from "../services/auth";
+import { saveSession, type AuthUser } from "../services/auth";
+
+function getPostLoginPath(
+  state: unknown,
+  search: string,
+  role: AuthUser["role"]
+): string {
+  let requestedPath: string | null = null;
+
+  if (typeof state === "object" && state !== null && "from" in state) {
+    const from = state.from;
+
+    if (typeof from === "string") {
+      requestedPath = from;
+    } else if (typeof from === "object" && from !== null && "pathname" in from) {
+      const location = from as {
+        pathname?: unknown;
+        search?: unknown;
+        hash?: unknown;
+      };
+
+      if (typeof location.pathname === "string") {
+        requestedPath =
+          location.pathname +
+          (typeof location.search === "string" ? location.search : "") +
+          (typeof location.hash === "string" ? location.hash : "");
+      }
+    }
+  }
+
+  requestedPath ??= new URLSearchParams(search).get("returnTo");
+
+  if (
+    !requestedPath ||
+    !requestedPath.startsWith("/") ||
+    requestedPath.startsWith("//")
+  ) {
+    return getRoleDashboard(role);
+  }
+
+  let destination: URL;
+
+  try {
+    destination = new URL(requestedPath, window.location.origin);
+  } catch {
+    return getRoleDashboard(role);
+  }
+
+  const roleBase = {
+    OWNER: "/owner",
+    DRIVER: "/driver",
+    CUSTOMER: "/customer",
+  }[role];
+
+  if (
+    destination.origin !== window.location.origin ||
+    (destination.pathname !== roleBase &&
+      !destination.pathname.startsWith(`${roleBase}/`))
+  ) {
+    return getRoleDashboard(role);
+  }
+
+  return destination.pathname + destination.search + destination.hash;
+}
+
+function getRoleDashboard(role: AuthUser["role"]): string {
+  if (role === "OWNER") {
+    return "/owner/dashboard";
+  }
+
+  if (role === "DRIVER") {
+    return "/driver/dashboard";
+  }
+
+  return "/customer/dashboard";
+}
 
 export default function Login() {
   const navigate = useNavigate();
+  const location = useLocation();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -39,17 +115,11 @@ export default function Login() {
       const { user, accessToken } = response.data.data;
 
       saveSession(accessToken, user);
-
-      if (user.role === "OWNER") {
-        navigate("/owner/dashboard", { replace: true });
-      } else if (user.role === "DRIVER") {
-        navigate("/driver/dashboard", { replace: true });
-      } else {
-        navigate("/customer/dashboard", { replace: true });
-      }
-    } catch (err: unknown) {
-      console.error("Login failed:", err);
-
+      navigate(
+        getPostLoginPath(location.state, location.search, user.role),
+        { replace: true }
+      );
+    } catch {
       setError(
         "We couldn't sign you in. Please check your email and password."
       );

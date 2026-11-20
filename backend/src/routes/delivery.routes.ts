@@ -1,6 +1,5 @@
 import { Router } from "express";
-import { DeliveryStatus, OrderStatus, UserRole } from "@prisma/client";
-import { z } from "zod";
+import { UserRole } from "@prisma/client";
 import { prisma } from "../config/prisma.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import {
@@ -9,19 +8,14 @@ import {
   type AuthenticatedRequest,
 } from "../middleware/auth.js";
 
+
 const router = Router();
 
-const assignmentSchema = z.object({
-  driverId: z.string().trim().min(1, "Driver ID is required"),
-});
-
-// Assign a delivery to a driver
-router.patch(
-  "/:deliveryId/assign",
+router.get(
+  "/:deliveryId",
   authenticate,
-  allowRoles(UserRole.OWNER),
-  asyncHandler(async (req, res) => {
-    // 1. Validate the delivery ID from the URL
+  allowRoles(UserRole.CUSTOMER),
+  asyncHandler(async (req: AuthenticatedRequest, res) => {
     const deliveryId = req.params.deliveryId;
 
     if (
@@ -30,130 +24,17 @@ router.patch(
     ) {
       return res.status(400).json({
         success: false,
-        message: "A valid delivery ID is required",
+        message: "A valid delivery ID is required.",
       });
     }
 
-    // 2. Validate the request body
-    const parsed = assignmentSchema.safeParse(req.body);
-
-    if (!parsed.success) {
-      return res.status(400).json({
-        success: false,
-        message: "A valid driver ID is required",
-        errors: parsed.error.flatten(),
-      });
-    }
-
-    // 3. Assign the driver inside a transaction
-    const delivery = await prisma.$transaction(async (tx) => {
-      const current = await tx.delivery.findUnique({
-        where: {
-          id: deliveryId,
-        },
-      });
-
-      if (!current) {
-        throw new Error("DELIVERY_NOT_FOUND");
-      }
-
-      if (
-        current.status === DeliveryStatus.DELIVERED ||
-        current.status === DeliveryStatus.CANCELLED
-      ) {
-        throw new Error("DELIVERY_NOT_ASSIGNABLE");
-      }
-
-      // Find the requested driver
-      const driver = await tx.driverProfile.findUnique({
-        where: {
-          id: parsed.data.driverId,
-        },
-        include: {
-          user: true,
-        },
-      });
-
-      if (!driver || !driver.user.isActive) {
-        throw new Error("DRIVER_NOT_FOUND");
-      }
-
-      if (driver.availability === "OFFLINE") {
-        throw new Error("DRIVER_OFFLINE");
-      }
-
-      // Update the delivery assignment
-      const updatedDelivery = await tx.delivery.update({
-        where: {
-          id: current.id,
-        },
-        data: {
-          driverId: driver.id,
-          status: DeliveryStatus.ASSIGNED,
-          startedAt: null,
-          pickedUpAt: null,
-          deliveredAt: null,
-        },
-      });
-
-      // Update the associated order
-      await tx.order.update({
-        where: {
-          id: current.orderId,
-        },
-        data: {
-          status: OrderStatus.ASSIGNED,
-        },
-      });
-
-      // Mark the selected driver as busy
-      await tx.driverProfile.update({
-        where: {
-          id: driver.id,
-        },
-        data: {
-          availability: "BUSY",
-        },
-      });
-
-      return updatedDelivery;
-    });
-
-    return res.json({
-      success: true,
-      message: "Driver assigned successfully",
-      data: delivery,
-    });
-  })
-);
-
-// Get the authenticated driver's active deliveries
-router.get(
-  "/my",
-  authenticate,
-  allowRoles(UserRole.DRIVER),
-  asyncHandler(async (req: AuthenticatedRequest, res) => {
-    const driver = await prisma.driverProfile.findUnique({
+    const delivery = await prisma.delivery.findFirst({
       where: {
-        userId: req.user!.id,
-      },
-    });
-
-    if (!driver) {
-      return res.status(403).json({
-        success: false,
-        message: "Driver profile required",
-      });
-    }
-
-    const deliveries = await prisma.delivery.findMany({
-      where: {
-        driverId: driver.id,
-        status: {
-          notIn: [
-            DeliveryStatus.DELIVERED,
-            DeliveryStatus.CANCELLED,
-          ],
+        id: deliveryId,
+        order: {
+          customer: {
+            userId: req.user!.id,
+          },
         },
       },
       include: {
@@ -161,33 +42,55 @@ router.get(
           include: {
             address: true,
             customer: {
-              include: {
+              select: {
                 user: {
-                  select: {
-                    name: true,
-                    phone: true,
-                  },
+                  select: { name: true, phone: true },
                 },
-              },
-            },
-            items: {
-              include: {
-                product: true,
               },
             },
           },
         },
-      },
-      orderBy: {
-        createdAt: "desc",
+        driver: {
+          include: {
+            user: {
+              select: { name: true, phone: true },
+            },
+          },
+        },
       },
     });
 
-    return res.json({
+    if (!delivery) {
+      return res.status(404).json({
+        success: false,
+        message: "Delivery not found for this customer.",
+      });
+    }
+
+    return res.status(200).json({
       success: true,
-      data: deliveries,
+      data: {
+        id: delivery.id,
+        status: delivery.status,
+        startedAt: delivery.startedAt,
+        completedAt: delivery.completedAt,
+        cancelledAt: delivery.cancelledAt,
+        cancellationReason: delivery.cancellationReason,
+        orderNumber: delivery.order.orderNumber,
+        address: delivery.order.address,
+        customer: delivery.order.customer.user,
+        driver: delivery.driver
+          ? {
+              name: delivery.driver.user.name,
+              phone: delivery.driver.user.phone,
+            }
+          : null,
+      },
     });
   })
 );
+
+
+
 
 export default router;

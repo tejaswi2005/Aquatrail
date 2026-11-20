@@ -1,6 +1,7 @@
 
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
+import { isAxiosError } from "axios";
 import {
   AlertTriangle,
   Boxes,
@@ -50,6 +51,14 @@ const emptyForm: EditForm = {
   imageUrl: "",
 };
 
+function getApiErrorMessage(error: unknown, fallback: string) {
+  if (isAxiosError<{ message?: string }>(error)) {
+    return error.response?.data?.message ?? fallback;
+  }
+
+  return fallback;
+}
+
 const money = (paise: number) =>
   new Intl.NumberFormat("en-IN", {
     style: "currency",
@@ -74,12 +83,7 @@ export default function OwnerProducts() {
   const [restockNote, setRestockNote] = useState("");
   const [savingStock, setSavingStock] = useState(false);
 
-  const loadProducts = async (showRefresh = false) => {
-    if (showRefresh) setRefreshing(true);
-    else setLoading(true);
-
-    setError("");
-
+  const loadProducts = async () => {
     try {
       const response = await api.get<ApiResponse<Product[]>>("/products");
       setProducts(response.data.data ?? []);
@@ -92,8 +96,39 @@ export default function OwnerProducts() {
   };
 
   useEffect(() => {
-    void loadProducts();
+    let active = true;
+
+    async function fetchProducts() {
+      try {
+        const response = await api.get<ApiResponse<Product[]>>("/products");
+
+        if (active) setProducts(response.data.data ?? []);
+      } catch {
+        if (active) {
+          setError(
+            "Unable to load products. Please check your connection and try again."
+          );
+        }
+      } finally {
+        if (active) {
+          setLoading(false);
+          setRefreshing(false);
+        }
+      }
+    }
+
+    void fetchProducts();
+
+    return () => {
+      active = false;
+    };
   }, []);
+
+  async function refreshProducts() {
+    setRefreshing(true);
+    setError("");
+    await loadProducts();
+  }
 
   const filteredProducts = useMemo(() => {
     const term = search.trim().toLowerCase();
@@ -171,9 +206,12 @@ export default function OwnerProducts() {
       );
       setEditing(null);
       setNotice("Product details updated successfully.");
-    } catch (err: any) {
+    } catch (err: unknown) {
       setError(
-        err.response?.data?.message ?? "Could not update the product. Please try again."
+        getApiErrorMessage(
+          err,
+          "Could not update the product. Please try again."
+        )
       );
     } finally {
       setSaving(false);
@@ -217,9 +255,12 @@ export default function OwnerProducts() {
       );
       setRestocking(null);
       setNotice(`${quantity} unit${quantity === 1 ? "" : "s"} added to ${restocking.name}.`);
-    } catch (err: any) {
+    } catch (err: unknown) {
       setError(
-        err.response?.data?.message ?? "Could not update stock. Please try again."
+        getApiErrorMessage(
+          err,
+          "Could not update stock. Please try again."
+        )
       );
     } finally {
       setSavingStock(false);
@@ -269,7 +310,7 @@ export default function OwnerProducts() {
             </div>
             <button
               type="button"
-              onClick={() => void loadProducts(true)}
+              onClick={() => void refreshProducts()}
               disabled={refreshing || loading}
               className="inline-flex items-center justify-center gap-2 self-start rounded-xl bg-white px-4 py-3 text-sm font-bold text-sky-700 shadow-sm transition hover:bg-sky-50 disabled:opacity-60 sm:self-center"
             >

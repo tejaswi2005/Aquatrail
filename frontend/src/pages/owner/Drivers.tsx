@@ -20,8 +20,6 @@ import {
 } from "lucide-react";
 import { api } from "../../services/api";
 
-type Availability = "AVAILABLE" | "BUSY" | "OFFLINE";
-
 type Driver = {
   id: string;
   userId?: string;
@@ -29,9 +27,7 @@ type Driver = {
   email?: string | null;
   phone?: string | null;
   licenseNumber?: string | null;
-  isAvailable?: boolean;
-  availability?: Availability;
-  activeDeliveries?: number;
+  isActive: boolean;
 };
 
 type ApiResponse<T> = {
@@ -54,20 +50,6 @@ const emptyForm: DriverForm = {
   phone: "",
   licenseNumber: "",
   temporaryPassword: "",
-};
-
-function getAvailability(driver: Driver): string {
-  if (driver.availability) return driver.availability;
-  if (driver.isAvailable === true) return "AVAILABLE";
-  if (driver.isAvailable === false) return "BUSY";
-  return "UNKNOWN";
-}
-
-const availabilityStyles: Record<string, string> = {
-  AVAILABLE: "bg-emerald-50 text-emerald-700 ring-emerald-200",
-  BUSY: "bg-amber-50 text-amber-700 ring-amber-200",
-  OFFLINE: "bg-slate-100 text-slate-600 ring-slate-200",
-  UNKNOWN: "bg-slate-100 text-slate-600 ring-slate-200",
 };
 
 function getApiError(error: unknown, fallback: string): string {
@@ -95,7 +77,6 @@ function getApiError(error: unknown, fallback: string): string {
 export default function Drivers() {
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState("ALL");
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
@@ -107,11 +88,7 @@ export default function Drivers() {
   const [creating, setCreating] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
 
-  const loadDrivers = useCallback(async (refresh = false) => {
-    setError("");
-    if (refresh) setRefreshing(true);
-    else setLoading(true);
-
+  const loadDrivers = useCallback(async () => {
     try {
       const response = await api.get<ApiResponse<Driver[]>>("/drivers");
 
@@ -134,8 +111,46 @@ export default function Drivers() {
   }, []);
 
   useEffect(() => {
-    void loadDrivers();
-  }, [loadDrivers]);
+    let active = true;
+
+    async function fetchDrivers() {
+      try {
+        const response = await api.get<ApiResponse<Driver[]>>("/drivers");
+
+        if (!Array.isArray(response.data.data)) {
+          throw new Error("Unexpected driver response.");
+        }
+
+        if (active) setDrivers(response.data.data);
+      } catch (err: unknown) {
+        if (!active) return;
+
+        setError(
+          getApiError(
+            err,
+            "Could not load drivers. Check the driver API and try again."
+          )
+        );
+      } finally {
+        if (active) {
+          setLoading(false);
+          setRefreshing(false);
+        }
+      }
+    }
+
+    void fetchDrivers();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  async function refreshDrivers() {
+    setError("");
+    setRefreshing(true);
+    await loadDrivers();
+  }
 
   const filteredDrivers = useMemo(() => {
     const query = search.trim().toLowerCase();
@@ -147,16 +162,9 @@ export default function Drivers() {
         (driver.email ?? "").toLowerCase().includes(query) ||
         (driver.phone ?? "").toLowerCase().includes(query);
 
-      const status = getAvailability(driver);
-      const matchesFilter = filter === "ALL" || status === filter;
-
-      return matchesSearch && matchesFilter;
+      return matchesSearch;
     });
-  }, [drivers, search, filter]);
-
-  const availableCount = drivers.filter(
-    (driver) => getAvailability(driver) === "AVAILABLE"
-  ).length;
+  }, [drivers, search]);
 
   const updateField = (field: keyof DriverForm, value: string) => {
     setForm((previous) => ({ ...previous, [field]: value }));
@@ -224,7 +232,7 @@ export default function Drivers() {
           "Driver account created successfully. Share the temporary password securely."
       );
 
-      await loadDrivers(true);
+      await refreshDrivers();
     } catch (err: unknown) {
       setFormError(
         getApiError(
@@ -271,7 +279,7 @@ export default function Drivers() {
             </p>
             <h2 className="mt-2 text-3xl font-extrabold">Drivers</h2>
             <p className="mt-2 text-sm text-sky-50">
-              Manage your delivery team, accounts and availability.
+              Manage driver accounts and contact details.
             </p>
           </div>
 
@@ -291,7 +299,7 @@ export default function Drivers() {
 
             <button
               type="button"
-              onClick={() => void loadDrivers(true)}
+              onClick={() => void refreshDrivers()}
               disabled={loading || refreshing}
               className="inline-flex items-center justify-center gap-2 rounded-xl border border-white/40 bg-white/10 px-4 py-3 text-sm font-bold text-white transition hover:bg-white/20 disabled:opacity-60"
             >
@@ -348,14 +356,14 @@ export default function Drivers() {
           <div className="rounded-2xl border border-slate-200 bg-white p-5">
             <div className="flex items-center justify-between">
               <span className="text-sm text-slate-500">
-                Available drivers
+                Active accounts
               </span>
               <span className="rounded-xl bg-emerald-50 p-3 text-emerald-600">
                 <Truck size={21} />
               </span>
             </div>
             <p className="mt-3 text-3xl font-extrabold text-slate-900">
-              {loading ? "—" : availableCount}
+              {loading ? "—" : drivers.filter((driver) => driver.isActive).length}
             </p>
           </div>
         </section>
@@ -367,7 +375,7 @@ export default function Drivers() {
                 Driver directory
               </h3>
               <p className="mt-1 text-sm text-slate-500">
-                Contact information, availability and active deliveries.
+                Driver account and contact information.
               </p>
             </div>
 
@@ -386,17 +394,6 @@ export default function Drivers() {
                 />
               </div>
 
-              <select
-                value={filter}
-                onChange={(event) => setFilter(event.target.value)}
-                aria-label="Filter drivers"
-                className="rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-sky-400"
-              >
-                <option value="ALL">All drivers</option>
-                <option value="AVAILABLE">Available</option>
-                <option value="BUSY">Busy</option>
-                <option value="OFFLINE">Offline</option>
-              </select>
             </div>
           </div>
 
@@ -414,7 +411,7 @@ export default function Drivers() {
               <p className="mt-1 text-sm text-slate-500">
                 {drivers.length === 0
                   ? "Add your first driver to start managing deliveries."
-                  : "Try changing your search or filter."}
+                  : "Try changing your search."}
               </p>
               {drivers.length === 0 && (
                 <button
@@ -435,15 +432,11 @@ export default function Drivers() {
                     <tr>
                       <th className="px-6 py-4">Driver</th>
                       <th className="px-6 py-4">Contact</th>
-                      <th className="px-6 py-4">Availability</th>
-                      <th className="px-6 py-4">Active deliveries</th>
+                      <th className="px-6 py-4">Account</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {filteredDrivers.map((driver) => {
-                      const status = getAvailability(driver);
-
-                      return (
+                    {filteredDrivers.map((driver) => (
                         <tr key={driver.id} className="hover:bg-sky-50/40">
                           <td className="px-6 py-4">
                             <div className="flex items-center gap-3">
@@ -484,30 +477,18 @@ export default function Drivers() {
                             {!driver.phone && !driver.email && "No contact details"}
                           </td>
                           <td className="px-6 py-4">
-                            <span
-                              className={`rounded-full px-3 py-1.5 text-xs font-bold ring-1 ring-inset ${
-                                availabilityStyles[status] ??
-                                availabilityStyles.UNKNOWN
-                              }`}
-                            >
-                              {status.replaceAll("_", " ")}
+                            <span className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-bold text-slate-700">
+                              {driver.isActive ? "Active" : "Inactive"}
                             </span>
                           </td>
-                          <td className="px-6 py-4 text-sm font-semibold text-slate-700">
-                            {driver.activeDeliveries ?? 0}
-                          </td>
                         </tr>
-                      );
-                    })}
+                    ))}
                   </tbody>
                 </table>
               </div>
 
               <div className="grid gap-3 p-4 md:hidden">
-                {filteredDrivers.map((driver) => {
-                  const status = getAvailability(driver);
-
-                  return (
+                {filteredDrivers.map((driver) => (
                     <article
                       key={driver.id}
                       className="rounded-2xl border border-slate-200 p-4"
@@ -522,18 +503,10 @@ export default function Drivers() {
                               {driver.name}
                             </h4>
                             <p className="text-xs text-slate-500">
-                              {driver.activeDeliveries ?? 0} active deliveries
+                              {driver.isActive ? "Active account" : "Inactive account"}
                             </p>
                           </div>
                         </div>
-                        <span
-                          className={`shrink-0 rounded-full px-2 py-1 text-xs font-bold ring-1 ring-inset ${
-                            availabilityStyles[status] ??
-                            availabilityStyles.UNKNOWN
-                          }`}
-                        >
-                          {status}
-                        </span>
                       </div>
 
                       {driver.phone && (
@@ -560,8 +533,7 @@ export default function Drivers() {
                         </p>
                       )}
                     </article>
-                  );
-                })}
+                ))}
               </div>
             </>
           )}

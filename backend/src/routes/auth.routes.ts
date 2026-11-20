@@ -6,6 +6,11 @@ import { UserRole } from "@prisma/client";
 
 import { prisma } from "../config/prisma.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
+import {
+  authenticate,
+  allowRoles,
+  type AuthenticatedRequest,
+} from "../middleware/auth.js";
 
 const router = Router();
 
@@ -13,13 +18,33 @@ const registerSchema = z.object({
   name: z.string().trim().min(2).max(100),
   email: z.string().trim().email().transform((email) => email.toLowerCase()),
   password: z.string().min(8).max(100),
-  phone: z.string().trim().min(7).max(20).optional(),
+  phone: z.string().trim().min(7).max(20),
 });
 
 const loginSchema = z.object({
   email: z.string().trim().email().transform((email) => email.toLowerCase()),
   password: z.string().min(1),
 });
+
+const changePasswordSchema = z
+  .object({
+    currentPassword: z.string().min(1).max(100),
+    newPassword: z
+      .string()
+      .min(10)
+      .max(72)
+      .refine(
+        (password) => Buffer.byteLength(password, "utf8") <= 72,
+        "New password must be no more than 72 bytes."
+      ),
+  })
+  .refine(
+    ({ currentPassword, newPassword }) => currentPassword !== newPassword,
+    {
+      message: "New password must be different from the current password.",
+      path: ["newPassword"],
+    }
+  );
 
 /**
  * POST /api/auth/register
@@ -162,6 +187,69 @@ router.post(
         },
         accessToken,
       },
+    });
+  })
+);
+
+/**
+ * POST /api/auth/change-password
+ * Update the authenticated owner's password after verifying the current one.
+ */
+router.post(
+  "/change-password",
+  authenticate,
+  allowRoles(UserRole.OWNER),
+  asyncHandler(async (req: AuthenticatedRequest, res) => {
+    const parsed = changePasswordSchema.safeParse(req.body);
+
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        message: "Enter a valid new password.",
+        errors: parsed.error.flatten(),
+      });
+      return;
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: req.user!.id },
+      select: {
+        id: true,
+        passwordHash: true,
+        isActive: true,
+      },
+    });
+
+    if (!user || !user.isActive) {
+      res.status(401).json({
+        success: false,
+        message: "Your account is not available. Please sign in again.",
+      });
+      return;
+    }
+
+    const currentPasswordMatches = await bcrypt.compare(
+      parsed.data.currentPassword,
+      user.passwordHash
+    );
+
+    if (!currentPasswordMatches) {
+      res.status(400).json({
+        success: false,
+        message: "Current password is incorrect.",
+      });
+      return;
+    }
+
+    const passwordHash = await bcrypt.hash(parsed.data.newPassword, 12);
+    await prisma.user.update({
+      where: { id: user.id },
+      data: { passwordHash },
+    });
+
+    res.json({
+      success: true,
+      message: "Password changed successfully.",
     });
   })
 );

@@ -121,9 +121,6 @@ export default function Inventory() {
   const [form, setForm] = useState<ProductForm>(emptyForm);
 
   const loadProducts = useCallback(async () => {
-    setLoading(true);
-    setError("");
-
     try {
       const response = await api.get<ApiResponse<unknown>>("/products");
       setProducts(getProducts(response.data));
@@ -135,8 +132,32 @@ export default function Inventory() {
   }, []);
 
   useEffect(() => {
-    void loadProducts();
-  }, [loadProducts]);
+    let active = true;
+
+    async function fetchProducts() {
+      try {
+        const response = await api.get<ApiResponse<unknown>>("/products");
+
+        if (active) setProducts(getProducts(response.data));
+      } catch (err) {
+        if (active) setError(getErrorMessage(err));
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    void fetchProducts();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  async function refreshProducts() {
+    setLoading(true);
+    setError("");
+    await loadProducts();
+  }
 
   const stats = useMemo(() => {
     const active = products.filter((product) => product.isActive !== false);
@@ -233,7 +254,7 @@ export default function Inventory() {
       setShowForm(false);
       setNotice("Product added successfully.");
 
-      await loadProducts();
+      await refreshProducts();
     } catch (err) {
       setError(getErrorMessage(err));
     } finally {
@@ -281,7 +302,7 @@ export default function Inventory() {
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
-              onClick={() => void loadProducts()}
+              onClick={() => void refreshProducts()}
               disabled={loading}
               className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-100 disabled:opacity-50"
             >

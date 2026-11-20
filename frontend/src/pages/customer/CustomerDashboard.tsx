@@ -3,10 +3,11 @@ import { Link } from "react-router-dom";
 import {
   AlertCircle,
   ArrowRight,
+  CalendarDays,
   CheckCircle2,
   ClipboardList,
   Droplets,
-  Home,
+  LogOut,
   MapPin,
   Package,
   Plus,
@@ -18,6 +19,9 @@ import {
 } from "lucide-react";
 
 import { api } from "../../services/api";
+import StatusBadge from "../../components/ui/StatusBadge";
+import { clearSession, getSessionUser } from "../../services/auth";
+import type { SubscriptionView } from "../../components/customer/SubscriptionSummary";
 
 // --------------------------------------------------
 // Types
@@ -37,6 +41,7 @@ interface Product {
 interface Delivery {
   id: string;
   status: string;
+  driver?: { user: { name: string; phone: string | null } } | null;
 }
 
 interface CustomerOrder {
@@ -46,6 +51,7 @@ interface CustomerOrder {
   totalAmountPaise: number;
   createdAt: string;
   delivery: Delivery | null;
+  subscriptionOccurrence?: { scheduledAt: string } | null;
 }
 
 // --------------------------------------------------
@@ -74,31 +80,6 @@ function formatDate(date: string): string {
   }).format(parsedDate);
 }
 
-function statusStyle(status: string): string {
-  switch (status.toUpperCase()) {
-    case "DELIVERED":
-      return "bg-emerald-50 text-emerald-700";
-
-    case "CANCELLED":
-      return "bg-red-50 text-red-700";
-
-    case "IN_DELIVERY":
-    case "OUT_FOR_DELIVERY":
-    case "IN_TRANSIT":
-    case "ASSIGNED":
-    case "READY":
-      return "bg-blue-50 text-blue-700";
-
-    case "CONFIRMED":
-    case "PROCESSING":
-    case "PREPARING":
-      return "bg-amber-50 text-amber-700";
-
-    default:
-      return "bg-slate-100 text-slate-700";
-  }
-}
-
 function statusLabel(status: string): string {
   return status
     .replace(/_/g, " ")
@@ -107,17 +88,24 @@ function statusLabel(status: string): string {
 }
 
 function isActiveOrder(status: string): boolean {
-  return [
-    "PENDING",
-    "CONFIRMED",
-    "PROCESSING",
-    "PREPARING",
-    "READY",
-    "ASSIGNED",
-    "IN_DELIVERY",
-    "OUT_FOR_DELIVERY",
-    "IN_TRANSIT",
-  ].includes(status.toUpperCase());
+  return ["PENDING", "STARTED"].includes(status.toUpperCase());
+}
+
+function canTrackDelivery(delivery: Delivery | null): delivery is Delivery {
+  return Boolean(delivery && delivery.status === "STARTED");
+}
+
+async function fetchDashboardData() {
+  const [productResponse, orderResponse, subscriptionResponse] = await Promise.all([
+    api.get("/products"),
+    api.get("/orders/my"),
+    api.get("/subscriptions/my"),
+  ]);
+  return {
+    products: extractArray<Product>(productResponse.data, "products"),
+    orders: extractArray<CustomerOrder>(orderResponse.data, "orders"),
+    subscriptions: extractArray<SubscriptionView>(subscriptionResponse.data, "subscriptions"),
+  };
 }
 
 function getErrorMessage(error: unknown): string {
@@ -189,38 +177,19 @@ function extractArray<T>(
 export default function CustomerDashboard() {
   const [products, setProducts] = useState<Product[]>([]);
   const [orders, setOrders] = useState<CustomerOrder[]>([]);
+  const [subscriptions, setSubscriptions] = useState<SubscriptionView[]>([]);
 
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
 
-  const loadDashboard = useCallback(async (isRefresh = false) => {
-    setError("");
-
-    if (isRefresh) {
-      setRefreshing(true);
-    } else {
-      setLoading(true);
-    }
-
+  const loadDashboard = useCallback(async () => {
     try {
-      const [productResponse, orderResponse] = await Promise.all([
-        api.get("/products"),
-        api.get("/orders/my"),
-      ]);
-
-      const productData = extractArray<Product>(
-        productResponse.data,
-        "products"
-      );
-
-      const orderData = extractArray<CustomerOrder>(
-        orderResponse.data,
-        "orders"
-      );
-
-      setProducts(productData);
-      setOrders(orderData);
+      const data = await fetchDashboardData();
+      setProducts(data.products);
+      setOrders(data.orders);
+      setSubscriptions(data.subscriptions);
+      setError("");
     } catch (err: unknown) {
       console.error("Failed to load customer dashboard:", err);
 
@@ -232,8 +201,40 @@ export default function CustomerDashboard() {
   }, []);
 
   useEffect(() => {
+    let active = true;
+
+    async function fetchInitialDashboard() {
+      try {
+        const data = await fetchDashboardData();
+        if (!active) return;
+        setProducts(data.products);
+        setOrders(data.orders);
+        setSubscriptions(data.subscriptions);
+        setError("");
+      } catch (err: unknown) {
+        if (active) {
+          console.error("Failed to load customer dashboard:", err);
+          setError(getErrorMessage(err));
+        }
+      } finally {
+        if (active) {
+          setLoading(false);
+          setRefreshing(false);
+        }
+      }
+    }
+
+    void fetchInitialDashboard();
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  function refreshDashboard() {
+    setError("");
+    setRefreshing(true);
     void loadDashboard();
-  }, [loadDashboard]);
+  }
 
   // --------------------------------------------------
   // Dashboard data
@@ -246,6 +247,10 @@ export default function CustomerDashboard() {
   const activeDeliveries = activeOrders.filter(
     (order) => order.delivery !== null
   );
+  const activeSubscription = subscriptions.find(
+    (subscription) => subscription.status === "ACTIVE"
+  );
+  const firstName = getSessionUser()?.name.trim().split(/\s+/)[0] || "there";
 
   const availableProducts = products.filter(
     (product) =>
@@ -261,12 +266,17 @@ export default function CustomerDashboard() {
     )
     .slice(0, 4);
 
+  function handleLogout() {
+    clearSession();
+    window.location.assign("/login");
+  }
+
   // --------------------------------------------------
   // Render
   // --------------------------------------------------
 
   return (
-    <div className="min-h-screen bg-slate-50 pb-24 text-slate-900 md:pb-8">
+    <div className="min-h-screen bg-slate-50 pb-8 text-slate-900">
       {/* Header */}
       <header className="sticky top-0 z-30 border-b border-slate-100 bg-white/95 backdrop-blur-xl">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3.5 sm:px-6 lg:px-8">
@@ -292,7 +302,7 @@ export default function CustomerDashboard() {
           <div className="flex items-center gap-2 sm:gap-3">
             <button
               type="button"
-              onClick={() => void loadDashboard(true)}
+              onClick={refreshDashboard}
               disabled={refreshing || loading}
               aria-label="Refresh dashboard"
               className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-500 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-600 disabled:opacity-50"
@@ -317,6 +327,16 @@ export default function CustomerDashboard() {
                 My Profile
               </span>
             </Link>
+
+            <button
+              type="button"
+              onClick={handleLogout}
+              aria-label="Sign out"
+              title="Sign out"
+              className="flex h-10 w-10 items-center justify-center rounded-xl border border-slate-200 bg-white text-slate-500 transition hover:border-blue-200 hover:bg-sky-50 hover:text-blue-600"
+            >
+              <LogOut size={18} />
+            </button>
           </div>
         </div>
       </header>
@@ -331,23 +351,31 @@ export default function CustomerDashboard() {
             </p>
 
             <h1 className="text-3xl font-extrabold tracking-tight sm:text-4xl">
-              Welcome to AquaTrail
+              Welcome, {firstName}
             </h1>
 
             <p className="mt-2 max-w-xl text-sm leading-6 text-slate-500 sm:text-base">
-              Order your water, manage your deliveries, and track your
-              driver from one place.
+              Manage your subscription, deliveries, and driver tracking
+              from one place.
             </p>
           </div>
 
-          <Link
-            to="/customer/products"
-            className="inline-flex w-fit items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 py-3 text-sm font-bold text-white shadow-lg shadow-blue-200 transition hover:bg-blue-700"
-          >
-            <Plus size={18} />
-            Order water
-            <ArrowRight size={17} />
-          </Link>
+          <div className="flex flex-wrap gap-2">
+            <Link
+              to="/customer/subscriptions"
+              className="inline-flex w-fit items-center justify-center gap-2 rounded-xl border border-blue-200 bg-white px-4 py-3 text-sm font-bold text-blue-700 transition hover:bg-blue-50"
+            >
+              Manage subscriptions
+            </Link>
+            <Link
+              to="/customer/order-types"
+              className="inline-flex w-fit items-center justify-center gap-2 rounded-xl bg-blue-600 px-5 py-3 text-sm font-bold text-white shadow-lg shadow-blue-200 transition hover:bg-blue-700"
+            >
+              <Plus size={18} />
+              Choose a subscription
+              <ArrowRight size={17} />
+            </Link>
+          </div>
         </section>
 
         {/* Error message */}
@@ -363,7 +391,7 @@ export default function CustomerDashboard() {
 
             <button
               type="button"
-              onClick={() => void loadDashboard(true)}
+              onClick={refreshDashboard}
               className="w-fit rounded-lg bg-white px-3 py-2 text-sm font-semibold text-red-700 ring-1 ring-red-200 hover:bg-red-100"
             >
               Try again
@@ -426,12 +454,75 @@ export default function CustomerDashboard() {
           />
 
           <StatCard
-            icon={<Package size={22} />}
-            label="Available Bottle Size"
-            value={loading ? "—" : String(availableProducts.length)}
-            description="Ready to order"
+            icon={<CalendarDays size={22} />}
+            label="Active subscriptions"
+            value={loading ? "—" : String(subscriptions.filter((subscription) => subscription.status === "ACTIVE").length)}
+            description="Manage your delivery plans"
             iconClass="bg-emerald-50 text-emerald-600"
           />
+        </section>
+
+        <section className="mb-9">
+          <SectionHeading
+            title="Your subscription"
+            subtitle="Plan details and the next scheduled delivery."
+            action={
+              <Link to="/customer/subscriptions" className="text-sm font-bold text-blue-700 hover:text-blue-900">
+                View subscriptions
+              </Link>
+            }
+          />
+          {loading ? (
+            <LoadingCard />
+          ) : activeSubscription ? (
+            <article className="rounded-2xl border border-slate-100 bg-white p-5 shadow-sm sm:p-6">
+              <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-xs font-bold uppercase tracking-wider text-blue-700">
+                    {activeSubscription.packageType === "DAILY" ? "Monthly Daily Delivery" : "Monthly Alternate-Day Delivery"}
+                  </p>
+                  <h3 className="mt-1 text-lg font-extrabold text-slate-900">
+                    {activeSubscription.product.name}
+                  </h3>
+                  <p className="mt-1 text-sm text-slate-500">
+                    {activeSubscription.quantityPerDelivery} bottles per delivery · {activeSubscription.packageType === "DAILY" ? "Every day" : "Every two days"}
+                  </p>
+                </div>
+                <div className="sm:text-right">
+                  <p className="text-xs text-slate-500">Estimated 30-day subscription price</p>
+                  <p className="mt-1 text-xl font-extrabold text-slate-900">
+                    {formatPrice(
+                      activeSubscription.unitPricePaise *
+                        activeSubscription.quantityPerDelivery *
+                        (activeSubscription.packageType === "DAILY" ? 30 : 15)
+                    )}
+                  </p>
+                  <p className="mt-1 text-xs text-slate-500">Estimate only; no payment collected</p>
+                </div>
+              </div>
+              <div className="mt-5 flex flex-col gap-3 border-t border-slate-100 pt-4 text-sm sm:flex-row sm:items-center sm:justify-between">
+                <p className="text-slate-600">
+                  Next scheduled delivery:{" "}
+                  <strong className="text-slate-900">
+                    {activeSubscription.occurrences[0]
+                      ? formatDate(activeSubscription.occurrences[0].scheduledAt)
+                      : formatDate(activeSubscription.nextDeliveryDate)}
+                  </strong>
+                </p>
+                <Link to="/customer/order-types" className="inline-flex items-center gap-2 font-bold text-blue-700 hover:text-blue-900">
+                  Change or add plan <ArrowRight size={16} />
+                </Link>
+              </div>
+            </article>
+          ) : (
+            <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-5 py-8 text-center">
+              <p className="font-bold text-slate-800">No active subscription</p>
+              <p className="mt-1 text-sm text-slate-500">Choose daily or alternate-day deliveries to get started.</p>
+              <Link to="/customer/order-types" className="mt-4 inline-flex items-center gap-2 rounded-xl bg-blue-700 px-4 py-2.5 text-sm font-bold text-white hover:bg-blue-800">
+                Choose a plan <ArrowRight size={16} />
+              </Link>
+            </div>
+          )}
         </section>
 
         {/* Active deliveries */}
@@ -454,14 +545,14 @@ export default function CustomerDashboard() {
               </h3>
 
               <p className="mt-2 text-sm text-slate-500">
-                When you place an order, its progress will appear here.
+                Scheduled subscription deliveries will appear here.
               </p>
 
               <Link
-                to="/customer/products"
+                to="/customer/order-types"
                 className="mt-5 inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700"
               >
-                Browse water
+                Choose a subscription
                 <ArrowRight size={16} />
               </Link>
             </div>
@@ -479,21 +570,23 @@ export default function CustomerDashboard() {
                       </div>
 
                       <div className="min-w-0">
-                        <p className="font-bold text-slate-900">
-                          Order Created at
-                        </p>
+                        <p className="font-bold text-slate-900">Order #{order.orderNumber}</p>
 
                         <p className="mt-1 text-xs text-slate-500">
-                          {formatDate(order.createdAt)}
+                          {order.subscriptionOccurrence
+                            ? `Scheduled ${formatDate(order.subscriptionOccurrence.scheduledAt)}`
+                            : `Placed ${formatDate(order.createdAt)}`}
                         </p>
+                        {order.delivery?.driver && (
+                          <p className="mt-1 text-xs text-slate-600">
+                            {order.delivery.driver.user.name}
+                            {order.delivery.driver.user.phone ? ` · ${order.delivery.driver.user.phone}` : ""}
+                          </p>
+                        )}
                       </div>
                     </div>
 
-                    <span
-                      className={`shrink-0 rounded-full px-3 py-1.5 text-[11px] font-bold ${statusStyle(order.status)}`}
-                    >
-                      {statusLabel(order.status)}
-                    </span>
+                    <StatusBadge status={order.status} size="compact" />
                   </div>
 
                   <div className="my-5 flex items-center justify-between border-y border-slate-100 py-4">
@@ -527,10 +620,7 @@ export default function CustomerDashboard() {
                       <ArrowRight size={16} />
                     </Link>
 
-                    {order.delivery &&
-                      !["DELIVERED", "CANCELLED"].includes(
-                        order.status.toUpperCase()
-                      ) && (
+                    {canTrackDelivery(order.delivery) && (
                         <Link
                           to={`/customer/track/${order.delivery.id}`}
                           className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-3 text-sm font-bold text-white transition hover:bg-blue-700"
@@ -538,7 +628,7 @@ export default function CustomerDashboard() {
                           <MapPin size={17} />
                           Track delivery
                         </Link>
-                      )}
+                    )}
                   </div>
                 </article>
               ))}
@@ -632,7 +722,7 @@ export default function CustomerDashboard() {
                       </span>
 
                       <Link
-                        to="/customer/products"
+                        to="/customer/order-types"
                         className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-blue-700"
                       >
                         Order
@@ -712,17 +802,12 @@ export default function CustomerDashboard() {
                         {formatPrice(order.totalAmountPaise)}
                       </p>
 
-                      <span
-                        className={`mt-1 inline-flex rounded-full px-2.5 py-1 text-[11px] font-bold ${statusStyle(order.status)}`}
-                      >
-                        {statusLabel(order.status)}
-                      </span>
+                      <div className="mt-1">
+                        <StatusBadge status={order.status} size="compact" />
+                      </div>
                     </div>
 
-                    {order.delivery &&
-                      !["DELIVERED", "CANCELLED"].includes(
-                        order.status.toUpperCase()
-                      ) && (
+                    {canTrackDelivery(order.delivery) && (
                         <Link
                           to={`/customer/track/${order.delivery.id}`}
                           aria-label={`Track order ${order.orderNumber}`}
@@ -730,7 +815,7 @@ export default function CustomerDashboard() {
                         >
                           <MapPin size={18} />
                         </Link>
-                      )}
+                    )}
                   </div>
                 </div>
               ))}
@@ -747,35 +832,6 @@ export default function CustomerDashboard() {
         </footer>
       </main>
 
-      {/* Mobile bottom navigation */}
-      <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200 bg-white/95 px-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] pt-2 backdrop-blur-xl md:hidden">
-        <div className="mx-auto grid max-w-lg grid-cols-4">
-          <MobileNavItem
-            icon={<Home size={20} />}
-            label="Home"
-            href="/customer/dashboard"
-            active
-          />
-
-          <MobileNavItem
-            icon={<ShoppingBag size={20} />}
-            label="Shop"
-            href="/customer/products"
-          />
-
-          <MobileNavItem
-            icon={<ClipboardList size={20} />}
-            label="Orders"
-            href="/customer/orders"
-          />
-
-          <MobileNavItem
-            icon={<UserRound size={20} />}
-            label="Account"
-            href="/customer/profile"
-          />
-        </div>
-      </nav>
     </div>
   );
 }
@@ -862,33 +918,5 @@ function LoadingCard() {
       <div className="mt-2 h-3 w-2/3 rounded bg-slate-100" />
       <div className="mt-5 h-10 rounded-xl bg-slate-100" />
     </div>
-  );
-}
-
-interface MobileNavItemProps {
-  icon: React.ReactNode;
-  label: string;
-  href: string;
-  active?: boolean;
-}
-
-function MobileNavItem({
-  icon,
-  label,
-  href,
-  active = false,
-}: MobileNavItemProps) {
-  return (
-    <Link
-      to={href}
-      className={`flex flex-col items-center gap-1 rounded-xl py-2 text-[11px] font-semibold transition ${
-        active
-          ? "text-blue-600"
-          : "text-slate-400 hover:text-blue-600"
-      }`}
-    >
-      {icon}
-      {label}
-    </Link>
   );
 }

@@ -15,10 +15,15 @@ import {
 } from "lucide-react";
 
 import { api } from "../../services/api";
+import StatusBadge from "../../components/ui/StatusBadge";
 
 interface Delivery {
     id: string;
     status: string;
+    startedAt?: string | null;
+    completedAt?: string | null;
+    cancellationReason?: string | null;
+    driver?: { user: { name: string; phone: string | null } } | null;
 }
 
 interface Order {
@@ -27,8 +32,21 @@ interface Order {
     status: string;
     totalAmountPaise: number;
     createdAt: string;
+    subscriptionOccurrence?: { scheduledAt: string } | null;
     delivery?: Delivery | null;
 }
+
+const ORDER_STATUSES = [
+    "PENDING",
+    "STARTED",
+    "COMPLETED",
+    "CANCELLED",
+] as const;
+
+const ACTIVE_ORDER_STATUSES = new Set<string>([
+    "PENDING",
+    "STARTED",
+]);
 
 const formatPrice = (amountPaise: number) =>
     new Intl.NumberFormat("en-IN", {
@@ -44,27 +62,6 @@ const formatDate = (date: string) =>
         year: "numeric",
     });
 
-function getStatusStyle(status: string) {
-    switch (status.toUpperCase()) {
-        case "DELIVERED":
-            return "bg-emerald-50 text-emerald-700 ring-emerald-600/20";
-
-        case "CANCELLED":
-            return "bg-red-50 text-red-700 ring-red-600/20";
-
-        case "OUT_FOR_DELIVERY":
-        case "IN_TRANSIT":
-            return "bg-blue-50 text-blue-700 ring-blue-600/20";
-
-        case "CONFIRMED":
-        case "PROCESSING":
-            return "bg-amber-50 text-amber-700 ring-amber-600/20";
-
-        default:
-            return "bg-slate-100 text-slate-700 ring-slate-500/20";
-    }
-}
-
 function getStatusLabel(status: string) {
     return status.replace(/_/g, " ").toLowerCase().replace(/\b\w/g, (char) =>
         char.toUpperCase()
@@ -79,9 +76,6 @@ export default function CustomerOrders() {
 
     const loadOrders = useCallback(async () => {
         try {
-            setLoading(true);
-            setError("");
-
             const response = await api.get("/orders/my");
 
             const result = response.data?.data;
@@ -107,27 +101,73 @@ export default function CustomerOrders() {
     }, []);
 
     useEffect(() => {
+        let active = true;
+
+        async function fetchOrders() {
+            try {
+                const response = await api.get("/orders/my");
+
+                if (!active) return;
+
+                const result = response.data?.data;
+                setOrders(Array.isArray(result) ? result : []);
+            } catch (err: unknown) {
+                if (!active) return;
+
+                const message =
+                    typeof err === "object" &&
+                        err !== null &&
+                        "response" in err
+                        ? (
+                            err as {
+                                response?: {
+                                    data?: { message?: string };
+                                };
+                            }
+                        ).response?.data?.message
+                        : undefined;
+
+                setError(message || "Unable to load your orders. Please try again.");
+            } finally {
+                if (active) setLoading(false);
+            }
+        }
+
+        void fetchOrders();
+
+        return () => {
+            active = false;
+        };
+    }, []);
+
+    function refreshOrders() {
+        setLoading(true);
+        setError("");
         void loadOrders();
-    }, [loadOrders]);
+    }
 
     const filteredOrders =
         filter === "ALL"
             ? orders
             : orders.filter(
-                (order) => order.status.toUpperCase() === filter
+                (order) =>
+                    (order.delivery?.status ?? order.status).toUpperCase() === filter
             );
 
     const activeCount = orders.filter((order) =>
-        ["PENDING", "CONFIRMED", "PROCESSING", "OUT_FOR_DELIVERY", "IN_TRANSIT"]
-            .includes(order.status.toUpperCase())
+        ACTIVE_ORDER_STATUSES.has(
+            (order.delivery?.status ?? order.status).toUpperCase()
+        )
     ).length;
 
     const deliveredCount = orders.filter(
-        (order) => order.status.toUpperCase() === "DELIVERED"
+        (order) =>
+            (order.delivery?.status ?? order.status).toUpperCase() === "COMPLETED"
     ).length;
 
     const cancelledCount = orders.filter(
-        (order) => order.status.toUpperCase() === "CANCELLED"
+        (order) =>
+            (order.delivery?.status ?? order.status).toUpperCase() === "CANCELLED"
     ).length;
 
     return (
@@ -152,6 +192,12 @@ export default function CustomerOrders() {
 
                     <div className="flex items-center gap-2">
                         <Link
+                            to="/customer/subscriptions"
+                            className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-sky-50"
+                        >
+                            Subscriptions
+                        </Link>
+                        <Link
                             to="/customer/profile"
                             className="rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:bg-sky-50"
                         >
@@ -159,7 +205,7 @@ export default function CustomerOrders() {
                         </Link>
 
                         <button
-                            onClick={() => void loadOrders()}
+                            onClick={refreshOrders}
                             disabled={loading}
                             aria-label="Refresh orders"
                             className="rounded-xl border border-slate-200 p-2.5 text-slate-600 transition hover:bg-sky-50 disabled:opacity-50"
@@ -202,11 +248,11 @@ export default function CustomerOrders() {
                     </div>
 
                     <Link
-                        to="/customer/products"
+                        to="/customer/order-types"
                         className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-500 px-5 py-3 text-sm font-bold text-white shadow-lg shadow-blue-600/20 transition hover:-translate-y-0.5 hover:shadow-xl"
                     >
                         <ShoppingBag size={18} />
-                        Order Water
+                        Start a subscription
                         <ArrowRight size={17} />
                     </Link>
                 </section>
@@ -255,7 +301,7 @@ export default function CustomerOrders() {
                             </div>
 
                             <div className="-mx-1 flex flex-nowrap gap-2 overflow-x-auto px-1 pb-2 sm:mx-0 sm:flex-wrap sm:overflow-visible sm:pb-0">
-                                {["ALL", "PENDING", "CONFIRMED", "DELIVERED", "CANCELLED"].map(
+                                {["ALL", ...ORDER_STATUSES].map(
                                     (status) => (
                                         <button
                                             key={status}
@@ -284,7 +330,7 @@ export default function CustomerOrders() {
                         <div className="px-6 py-16 text-center">
                             <p className="font-semibold text-red-600">{error}</p>
                             <button
-                                onClick={() => void loadOrders()}
+                                onClick={refreshOrders}
                                 className="mt-4 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-blue-700"
                             >
                                 Try Again
@@ -308,7 +354,7 @@ export default function CustomerOrders() {
 
                             {orders.length === 0 && (
                                 <Link
-                                    to="/customer/products"
+                                    to="/customer/order-types"
                                     className="mt-5 inline-flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-3 text-sm font-bold text-white transition hover:bg-blue-700"
                                 >
                                     Browse Products
@@ -335,17 +381,31 @@ export default function CustomerOrders() {
                                                         Order #{order.orderNumber}
                                                     </h3>
 
-                                                    <span
-                                                        className={`rounded-full px-2.5 py-1 text-xs font-bold ring-1 ring-inset ${getStatusStyle(order.status)}`}
-                                                    >
-                                                        {getStatusLabel(order.status)}
-                                                    </span>
+                                                    <StatusBadge status={order.status} size="compact" />
                                                 </div>
 
                                                 <p className="mt-2 flex items-center gap-2 text-sm text-slate-500">
                                                     <CalendarDays size={15} />
-                                                    {formatDate(order.createdAt)}
+                                                    {order.subscriptionOccurrence
+                                                        ? `Scheduled ${formatDate(order.subscriptionOccurrence.scheduledAt)}`
+                                                        : `Placed ${formatDate(order.createdAt)}`}
                                                 </p>
+                                                {order.delivery?.driver && (
+                                                    <p className="mt-2 text-sm text-slate-600">
+                                                        Driver: {order.delivery.driver.user.name}
+                                                        {order.delivery.driver.user.phone ? ` · ${order.delivery.driver.user.phone}` : ""}
+                                                    </p>
+                                                )}
+                                                {order.delivery?.completedAt && (
+                                                    <p className="mt-1 text-xs text-emerald-700">
+                                                        Completed {formatDate(order.delivery.completedAt)}
+                                                    </p>
+                                                )}
+                                                {order.delivery?.status === "CANCELLED" && order.delivery.cancellationReason && (
+                                                    <p className="mt-1 text-xs text-rose-700">
+                                                        Cancellation reason: {order.delivery.cancellationReason}
+                                                    </p>
+                                                )}
 
                                                 <p className="mt-2 text-lg font-extrabold text-slate-900">
                                                     {formatPrice(order.totalAmountPaise)}
@@ -355,8 +415,8 @@ export default function CustomerOrders() {
 
                                         <div className="flex flex-wrap gap-3 lg:justify-end">
                                             {order.delivery?.id &&
-                                                !["DELIVERED", "CANCELLED"].includes(
-                                                    order.status.toUpperCase()
+                                                !["COMPLETED", "CANCELLED"].includes(
+                                                    (order.delivery?.status ?? order.status).toUpperCase()
                                                 ) && (
                                                     <Link
                                                         to={`/customer/track/${order.delivery.id}`}

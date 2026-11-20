@@ -8,6 +8,7 @@ import {
   ArrowRight,
   ArrowUpRight,
   Boxes,
+  CalendarDays,
   CheckCircle2,
   Clock3,
   Droplets,
@@ -18,10 +19,10 @@ import {
   TrendingUp,
   Truck,
   Users,
-  UserRound,
 } from "lucide-react";
 
 import { api } from "../../services/api";
+import StatusBadge from "../../components/ui/StatusBadge";
 import { clearSession } from "../../services/auth";
 import { User } from "lucide-react";
 
@@ -46,6 +47,7 @@ interface Order {
   status: string;
   totalAmountPaise: number;
   createdAt: string;
+  subscriptionOccurrence?: { scheduledAt: string } | null;
   customer?: {
     user?: { name?: string };
   };
@@ -55,6 +57,20 @@ interface Order {
     status: string;
     driver?: { user?: { name?: string } } | null;
   } | null;
+}
+
+interface SubscriptionOverview {
+  activeSubscriptions: number;
+  pausedSubscriptions: number;
+  deliveriesGeneratedToday: number;
+  upcomingDeliveries: number;
+  schedulingFailures: number;
+  subscriptionsNeedingAttention: number;
+  activeDriverAssignments: number;
+  unassignedDeliveries: number;
+  completedDeliveries: number;
+  cancelledDeliveries: number;
+  stockExceptions: number;
 }
 
 function extractArray<T>(response: unknown): T[] {
@@ -79,6 +95,17 @@ function extractArray<T>(response: unknown): T[] {
   return [];
 }
 
+function extractSubscriptionOverview(response: unknown): SubscriptionOverview | null {
+  if (!response || typeof response !== "object" || !("data" in response)) {
+    return null;
+  }
+  const data = response.data;
+  if (!data || typeof data !== "object") {
+    return null;
+  }
+  return data as SubscriptionOverview;
+}
+
 function formatMoney(paise: number) {
   return new Intl.NumberFormat("en-IN", {
     style: "currency",
@@ -99,51 +126,25 @@ function formatDate(date: string) {
   });
 }
 
-function statusStyle(status: string) {
-  switch (status.toUpperCase()) {
-    case "DELIVERED":
-      return "bg-emerald-50 text-emerald-700";
-    case "CANCELLED":
-    case "FAILED":
-      return "bg-red-50 text-red-700";
-    case "IN_TRANSIT":
-    case "PICKED_UP":
-    case "IN_DELIVERY":
-    case "OUT_FOR_DELIVERY":
-      return "bg-blue-50 text-blue-700";
-    case "CONFIRMED":
-    case "PREPARING":
-    case "READY":
-    case "ASSIGNED":
-    case "ACCEPTED":
-      return "bg-amber-50 text-amber-700";
-    default:
-      return "bg-slate-100 text-slate-700";
-  }
-}
-
-function displayStatus(status: string) {
-  return status.replaceAll("_", " ").toLowerCase().replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
 export default function OwnerDashboard() {
   const [orders, setOrders] = useState<Order[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
+  const [subscriptionOverview, setSubscriptionOverview] =
+    useState<SubscriptionOverview | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
   const loadDashboard = useCallback(async () => {
-    setLoading(true);
-    setError("");
-
     try {
-      const [orderResponse, productResponse] = await Promise.all([
+      const [orderResponse, productResponse, subscriptionResponse] = await Promise.all([
         api.get("/orders"),
         api.get("/products"),
+        api.get("/owner/subscriptions/overview"),
       ]);
 
       setOrders(extractArray<Order>(orderResponse.data));
       setProducts(extractArray<Product>(productResponse.data));
+      setSubscriptionOverview(extractSubscriptionOverview(subscriptionResponse.data));
     } catch (err: unknown) {
       console.error("Unable to load owner dashboard:", err);
 
@@ -168,24 +169,76 @@ export default function OwnerDashboard() {
   }, []);
 
   useEffect(() => {
+    let active = true;
+
+    async function fetchDashboard() {
+      try {
+        const [orderResponse, productResponse, subscriptionResponse] = await Promise.all([
+          api.get("/orders"),
+          api.get("/products"),
+          api.get("/owner/subscriptions/overview"),
+        ]);
+
+        if (!active) return;
+
+        setOrders(extractArray<Order>(orderResponse.data));
+        setProducts(extractArray<Product>(productResponse.data));
+        setSubscriptionOverview(extractSubscriptionOverview(subscriptionResponse.data));
+      } catch (err: unknown) {
+        if (!active) return;
+
+        console.error("Unable to load owner dashboard:", err);
+
+        const message =
+          typeof err === "object" &&
+            err !== null &&
+            "response" in err
+            ? (
+              err as {
+                response?: { data?: { message?: string } };
+              }
+            ).response?.data?.message
+            : undefined;
+
+        setError(
+          message ||
+          "Unable to load dashboard data. Check your owner account and API endpoints."
+        );
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    void fetchDashboard();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  function refreshDashboard() {
+    setLoading(true);
+    setError("");
     void loadDashboard();
-  }, [loadDashboard]);
+  }
 
   const today = new Date().toDateString();
 
   const todaysOrders = orders.filter(
-    (order) => new Date(order.createdAt).toDateString() === today
+    (order) =>
+      new Date(
+        order.subscriptionOccurrence?.scheduledAt ?? order.createdAt
+      ).toDateString() === today
   );
 
   const activeOrders = orders.filter((order) =>
-    ["PENDING", "CONFIRMED", "PREPARING", "READY", "ASSIGNED",
-      "IN_DELIVERY", "OUT_FOR_DELIVERY", "IN_TRANSIT"].includes(
+    ["PENDING", "STARTED"].includes(
         order.status.toUpperCase()
       )
   );
 
   const deliveredOrders = orders.filter(
-    (order) => order.status.toUpperCase() === "DELIVERED"
+    (order) => order.status.toUpperCase() === "COMPLETED"
   );
 
   const lowStockProducts = products.filter(
@@ -235,7 +288,7 @@ export default function OwnerDashboard() {
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => void loadDashboard()}
+              onClick={refreshDashboard}
               disabled={loading}
               className="rounded-xl border border-slate-200 p-2.5 text-slate-600 transition hover:bg-sky-50 disabled:opacity-50"
               aria-label="Refresh dashboard"
@@ -253,14 +306,14 @@ export default function OwnerDashboard() {
             </Link>
 
 
-            {/* <button
+            <button
               type="button"
               onClick={handleLogout}
               className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-semibold text-slate-700 hover:bg-red-50 hover:text-red-700"
             >
               <LogOut size={17} />
               <span className="hidden sm:inline">Logout</span>
-            </button> */}
+            </button>
           </div>
         </div>
       </header>
@@ -296,6 +349,20 @@ export default function OwnerDashboard() {
                 <Boxes size={18} />
                 Inventory
               </Link>
+              <Link
+                to="/owner/scheduled-deliveries"
+                className="inline-flex items-center gap-2 rounded-xl border border-white/30 bg-white/10 px-4 py-3 text-sm font-bold text-white transition hover:bg-white/20"
+              >
+                <CalendarDays size={18} />
+                Scheduled Deliveries
+              </Link>
+              <Link
+                to="/owner/customers"
+                className="inline-flex items-center gap-2 rounded-xl border border-white/30 bg-white/10 px-4 py-3 text-sm font-bold text-white transition hover:bg-white/20"
+              >
+                <Users size={18} />
+                Customers & Drivers
+              </Link>
             </div>
           </div>
         </section>
@@ -313,7 +380,7 @@ export default function OwnerDashboard() {
             </div>
             <button
               type="button"
-              onClick={() => void loadDashboard()}
+              onClick={refreshDashboard}
               className="rounded-lg bg-red-600 px-4 py-2 text-sm font-bold text-white hover:bg-red-700"
             >
               Retry
@@ -354,6 +421,97 @@ export default function OwnerDashboard() {
             iconStyle="bg-red-50 text-red-600"
             footer={<ArrowDownRight size={16} />}
           />
+        </section>
+
+        <section className="mb-8">
+          <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
+            <div>
+              <h2 className="text-xl font-extrabold">Subscription operations</h2>
+              <p className="mt-1 text-sm text-slate-500">
+                Live counts from the recurring delivery scheduler.
+              </p>
+            </div>
+            <Link
+              to="/owner/scheduled-deliveries"
+              className="inline-flex items-center gap-1 text-sm font-bold text-blue-600 hover:text-blue-800"
+            >
+              Open schedule <ArrowRight size={16} />
+            </Link>
+          </div>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-3">
+            <MetricCard
+              title="Active subscriptions"
+              value={loading ? "—" : subscriptionOverview?.activeSubscriptions ?? "Unavailable"}
+              note="Currently eligible for scheduling"
+              icon={<CheckCircle2 size={22} />}
+              iconStyle="bg-emerald-50 text-emerald-600"
+              footer={<Activity size={16} />}
+            />
+            <MetricCard
+              title="Paused subscriptions"
+              value={loading ? "—" : subscriptionOverview?.pausedSubscriptions ?? "Unavailable"}
+              note="No new occurrences generated"
+              icon={<Clock3 size={22} />}
+              iconStyle="bg-amber-50 text-amber-600"
+              footer={<Activity size={16} />}
+            />
+            <MetricCard
+              title="Deliveries generated today"
+              value={loading ? "—" : subscriptionOverview?.deliveriesGeneratedToday ?? "Unavailable"}
+              note="Recurring orders created today"
+              icon={<Truck size={22} />}
+              iconStyle="bg-blue-50 text-blue-600"
+              footer={<ArrowUpRight size={16} />}
+            />
+            <MetricCard
+              title="Upcoming deliveries"
+              value={loading ? "—" : subscriptionOverview?.upcomingDeliveries ?? "Unavailable"}
+              note="Generated within the next 7 days"
+              icon={<CalendarDays size={22} />}
+              iconStyle="bg-cyan-50 text-cyan-700"
+              footer={<ArrowUpRight size={16} />}
+            />
+            <MetricCard
+              title="Scheduling failures"
+              value={loading ? "—" : subscriptionOverview?.schedulingFailures ?? "Unavailable"}
+              note="Review product, stock, or address issues"
+              icon={<AlertTriangle size={22} />}
+              iconStyle="bg-rose-50 text-rose-600"
+              footer={<ArrowDownRight size={16} />}
+            />
+            <MetricCard
+              title="Subscriptions needing attention"
+              value={loading ? "—" : subscriptionOverview?.subscriptionsNeedingAttention ?? "Unavailable"}
+              note="Active packages with failed occurrences"
+              icon={<AlertTriangle size={22} />}
+              iconStyle="bg-orange-50 text-orange-600"
+              footer={<ArrowDownRight size={16} />}
+            />
+            <MetricCard
+              title="Active monthly assignments"
+              value={loading ? "—" : subscriptionOverview?.activeDriverAssignments ?? "Unavailable"}
+              note="Current driver commitments"
+              icon={<Users size={22} />}
+              iconStyle="bg-indigo-50 text-indigo-600"
+              footer={<Activity size={16} />}
+            />
+            <MetricCard
+              title="Unassigned deliveries"
+              value={loading ? "—" : subscriptionOverview?.unassignedDeliveries ?? "Unavailable"}
+              note="In the next 7 days"
+              icon={<Truck size={22} />}
+              iconStyle="bg-orange-50 text-orange-600"
+              footer={<AlertTriangle size={16} />}
+            />
+            <MetricCard
+              title="Stock exceptions"
+              value={loading ? "—" : subscriptionOverview?.stockExceptions ?? "Unavailable"}
+              note="Failed reservations need review"
+              icon={<Boxes size={22} />}
+              iconStyle="bg-rose-50 text-rose-600"
+              footer={<AlertTriangle size={16} />}
+            />
+          </div>
         </section>
 
         <section className="mb-8 grid grid-cols-1 gap-6 lg:grid-cols-3">
@@ -415,11 +573,7 @@ export default function OwnerDashboard() {
                           {formatMoney(order.totalAmountPaise)}
                         </td>
                         <td className="py-4">
-                          <span
-                            className={`inline-flex whitespace-nowrap rounded-full px-3 py-1 text-xs font-bold ${statusStyle(order.status)}`}
-                          >
-                            {displayStatus(order.status)}
-                          </span>
+                          <StatusBadge status={order.status} size="compact" />
                         </td>
                       </tr>
                     ))}
@@ -520,8 +674,15 @@ export default function OwnerDashboard() {
               to="/owner/drivers"
               icon={<Users size={22} />}
               title="Drivers"
-              description="Manage driver availability and assignments."
+              description="Assign drivers to customer subscriptions for a monthly period."
               style="bg-violet-50 text-violet-700"
+            />
+            <ActionCard
+              to="/owner/scheduled-deliveries"
+              icon={<CalendarDays size={22} />}
+              title="Scheduled Deliveries"
+              description="Review upcoming subscription orders and scheduling exceptions."
+              style="bg-cyan-50 text-cyan-700"
             />
           </div>
         </section>

@@ -209,9 +209,6 @@ export default function CustomerProfile() {
 
   async function loadProfile() {
     try {
-      setLoading(true);
-      setError("");
-
       const response = await api.get("/customers/me");
       const customer = normalizeProfile(response.data);
 
@@ -232,8 +229,45 @@ export default function CustomerProfile() {
   }
 
   useEffect(() => {
-    void loadProfile();
+    let active = true;
+
+    async function fetchProfile() {
+      try {
+        const response = await api.get("/customers/me");
+        const customer = normalizeProfile(response.data);
+
+        if (!customer) {
+          throw new Error("Customer profile data was not returned.");
+        }
+
+        if (!active) return;
+
+        setProfile(customer);
+        setPhoneInput(
+          getMobileNumber(customer.phone, customer.mobileNumber)
+        );
+      } catch (err: unknown) {
+        if (!active) return;
+
+        console.error("Unable to load customer profile:", err);
+        setError(getErrorMessage(err));
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    void fetchProfile();
+
+    return () => {
+      active = false;
+    };
   }, []);
+
+  async function reloadProfile() {
+    setLoading(true);
+    setError("");
+    await loadProfile();
+  }
 
   async function savePhone(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -380,7 +414,7 @@ export default function CustomerProfile() {
       setAddressForm(emptyAddressForm);
       setLocation(null);
 
-      await loadProfile();
+      await reloadProfile();
 
       setProfileMessage(
         wasEditing
@@ -402,7 +436,7 @@ export default function CustomerProfile() {
 
       await api.patch(`/addresses/${addressId}/default`);
 
-      await loadProfile();
+      await reloadProfile();
 
       setProfileMessage("Default delivery address updated.");
     } catch (err: unknown) {
@@ -443,7 +477,7 @@ export default function CustomerProfile() {
 
               <button
                 type="button"
-                onClick={() => void loadProfile()}
+                onClick={() => void reloadProfile()}
                 className="mt-4 inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-semibold text-white hover:bg-red-700"
               >
                 <RefreshCw className="h-4 w-4" />

@@ -1,7 +1,6 @@
 import {
   PrismaClient,
   UserRole,
-  DriverAvailability,
   OrderStatus,
   DeliveryStatus,
   InventoryTransactionType,
@@ -41,7 +40,6 @@ async function main() {
       driverProfile: {
         create: {
           licenseNumber: "DEMO-LICENSE-001",
-          availability: DriverAvailability.AVAILABLE,
         },
       },
     },
@@ -69,7 +67,6 @@ async function main() {
     create: {
       userId: driverUser.id,
       licenseNumber: "DEMO-LICENSE-001",
-      availability: DriverAvailability.AVAILABLE,
     },
   });
 
@@ -124,7 +121,7 @@ async function main() {
       orderNumber: `AT-DEMO-${Date.now()}`,
       customerId: customer.id,
       addressId: address.id,
-      status: OrderStatus.ASSIGNED,
+      status: OrderStatus.PENDING,
       totalAmountPaise: 16000,
       items: {
         create: [
@@ -144,13 +141,8 @@ async function main() {
     data: {
       orderId: order.id,
       driverId: driver.id,
-      status: DeliveryStatus.ASSIGNED,
+      status: DeliveryStatus.PENDING,
     },
-  });
-
-  await prisma.driverProfile.update({
-    where: { id: driver.id },
-    data: { availability: DriverAvailability.BUSY },
   });
 
   console.log("AquaTrail demo data created successfully.");

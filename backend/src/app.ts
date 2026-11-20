@@ -8,6 +8,8 @@ import orderRoutes from "./routes/order.routes.js";
 import deliveryRoutes from "./routes/delivery.routes.js";
 import customerRoutes from "./routes/customer.routes.js";
 import driverRoutes from "./routes/driver.routes.js";
+import ownerRoutes from "./routes/owner.routes.js";
+import subscriptionRoutes from "./routes/subscription.routes.js";
 
 export function createApp() {
   const app = express();
@@ -52,6 +54,8 @@ export function createApp() {
   app.use("/api/drivers", driverRoutes);
   app.use("/api/deliveries", deliveryRoutes);
   app.use("/api/customers", customerRoutes);
+  app.use("/api/owner", ownerRoutes);
+  app.use("/api/subscriptions", subscriptionRoutes);
 
   // Error handler
   app.use(
@@ -67,23 +71,26 @@ export function createApp() {
         return;
       }
 
+      if (error instanceof Error && "statusCode" in error) {
+        const statusCode = error.statusCode;
+
+        if (typeof statusCode === "number") {
+          return res.status(statusCode).json({
+            success: false,
+            message: error.message,
+          });
+        }
+      }
+
       if (
         error instanceof Error &&
         [
           "INVALID_PRODUCTS",
           "INSUFFICIENT_STOCK",
           "INVALID_PRICE",
-          "DELIVERY_NOT_FOUND",
-          "DELIVERY_NOT_ASSIGNABLE",
-          "DRIVER_NOT_FOUND",
-          "DRIVER_OFFLINE",
         ].includes(error.message)
       ) {
-        const status =
-          error.message === "DELIVERY_NOT_FOUND" ||
-          error.message === "DRIVER_NOT_FOUND"
-            ? 404
-            : 400;
+        const status = error.message === "INSUFFICIENT_STOCK" ? 409 : 400;
 
         return res.status(status).json({
           success: false,

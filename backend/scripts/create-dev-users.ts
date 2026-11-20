@@ -1,6 +1,6 @@
 import "dotenv/config";
 import bcrypt from "bcryptjs";
-import { PrismaClient, UserRole, DriverAvailability } from "@prisma/client";
+import { PrismaClient, UserRole } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
@@ -62,7 +62,6 @@ async function main() {
     update: {},
     create: {
       userId: driver.id,
-      availability: DriverAvailability.OFFLINE,
     },
   });
 

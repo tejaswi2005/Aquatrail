@@ -2,11 +2,12 @@
 import { Router } from "express";
 import {
   DeliveryStatus,
-  DriverAvailability,
-  OrderStatus,
+  NotificationType,
+  Prisma,
   UserRole,
 } from "@prisma/client";
 import { z } from "zod";
+import bcrypt from "bcryptjs";
 
 import { prisma } from "../config/prisma.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
@@ -15,85 +16,80 @@ import {
   allowRoles,
   type AuthenticatedRequest,
 } from "../middleware/auth.js";
+import {
+  listDriverDeliveries,
+  updateDeliveryStatusForDriver,
+} from "../services/orderWorkflow.service.js";
+import { clearLiveLocation } from "../services/liveLocation.service.js";
+import { sendDeliveryNotification } from "../services/smsNotification.service.js";
 
 const router = Router();
 
+const cancellationReasonSchema = z.enum([
+  "CUSTOMER_UNAVAILABLE",
+  "CUSTOMER_REQUESTED",
+  "ADDRESS_INCORRECT",
+  "PHONE_UNREACHABLE",
+  "OTHER",
+]);
+
 const statusSchema = z.object({
-  status: z.enum([
-    "ACCEPTED",
-    "PICKED_UP",
-    "IN_TRANSIT",
-    "DELIVERED",
-    "FAILED",
-  ]),
-  failureReason: z.string().trim().min(3).max(500).optional(),
+  status: z.enum(["STARTED", "COMPLETED", "CANCELLED"]),
+  cancellationReason: cancellationReasonSchema.optional(),
+  otherCancellationReason: z.string().trim().min(3).max(200).optional(),
+}).superRefine((data, ctx) => {
+  if (data.status === DeliveryStatus.CANCELLED && !data.cancellationReason) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["cancellationReason"],
+      message: "Choose a cancellation reason.",
+    });
+  }
+  if (
+    data.status === DeliveryStatus.CANCELLED &&
+    data.cancellationReason === "OTHER" &&
+    !data.otherCancellationReason
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["otherCancellationReason"],
+      message: "Explain the other cancellation reason.",
+    });
+  }
+  if (
+    data.status === DeliveryStatus.CANCELLED &&
+    data.cancellationReason !== "OTHER" &&
+    data.otherCancellationReason
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["otherCancellationReason"],
+      message: "Only provide an explanation when reason is Other.",
+    });
+  }
 });
 
-const activeStatuses: DeliveryStatus[] = [
-  DeliveryStatus.ASSIGNED,
-  DeliveryStatus.ACCEPTED,
-  DeliveryStatus.PICKED_UP,
-  DeliveryStatus.IN_TRANSIT,
-];
-
-const includeDelivery = {
-  order: {
-    include: {
-      customer: {
-        include: {
-          user: {
-            select: {
-              id: true,
-              name: true,
-              phone: true,
-              email: true,
-            },
-          },
-        },
-      },
-      address: true,
-      items: {
-        include: {
-          product: {
-            select: {
-              id: true,
-              name: true,
-              bottleSizeLiters: true,
-            },
-          },
-        },
-      },
-    },
-  },
-} as const;
-
 /**
- * GET /api/deliveries/my
- * Return deliveries assigned to the logged-in driver.
+ * GET /api/drivers/my
+ * Return the logged-in driver's delivery history.
  */
 router.get(
   "/my",
   authenticate,
   allowRoles(UserRole.DRIVER),
   asyncHandler(async (req: AuthenticatedRequest, res) => {
-    const driver = await prisma.driverProfile.findUnique({
-      where: { userId: req.user!.id },
-      select: { id: true },
-    });
+    const deliveries = await listDriverDeliveries(
+      req.user!.id,
+      false
+    );
 
-    if (!driver) {
+    if (!deliveries) {
       res.status(404).json({
         success: false,
         message: "Driver profile not found.",
       });
       return;
     }
-
-    const deliveries = await prisma.delivery.findMany({
-      where: { driverId: driver.id },
-      include: includeDelivery,
-      orderBy: { updatedAt: "desc" },
-    });
 
     res.json({
       success: true,
@@ -103,26 +99,30 @@ router.get(
         createdAt: delivery.createdAt,
         updatedAt: delivery.updatedAt,
         startedAt: delivery.startedAt,
-        pickedUpAt: delivery.pickedUpAt,
-        deliveredAt: delivery.deliveredAt,
-        failedAt: delivery.failedAt,
-        failureReason: delivery.failureReason,
+        completedAt: delivery.completedAt,
+        cancelledAt: delivery.cancelledAt,
+        cancellationReason: delivery.cancellationReason,
         order: {
           id: delivery.order.id,
           orderNumber: delivery.order.orderNumber,
           status: delivery.order.status,
           totalAmountPaise: delivery.order.totalAmountPaise,
           notes: delivery.order.notes,
+          scheduledAt:
+            delivery.order.subscriptionOccurrence?.scheduledAt ?? null,
           customer: {
             name: delivery.order.customer.user.name,
             phone: delivery.order.customer.user.phone,
-            email: delivery.order.customer.user.email,
           },
           address: delivery.order.address,
           items: delivery.order.items.map((item) => ({
             id: item.id,
             quantity: item.quantity,
-            product: item.product,
+            product: {
+              id: item.product.id,
+              name: item.product.name,
+              bottleSizeLiters: item.product.bottleSizeLiters,
+            },
           })),
         },
       })),
@@ -175,7 +175,6 @@ router.get(
         role: driver.user.role,
         isActive: driver.user.isActive,
         licenseNumber: driver.licenseNumber,
-        availability: driver.availability,
         createdAt: driver.user.createdAt,
       },
     });
@@ -203,15 +202,20 @@ router.patch(
       return;
     }
 
-    const { status: nextStatus, failureReason } = parsed.data;
+    const { status: nextStatus, cancellationReason, otherCancellationReason } =
+      parsed.data;
 
-    if (nextStatus === "FAILED" && !failureReason) {
-      res.status(400).json({
-        success: false,
-        message: "Please provide a reason when reporting a failed delivery.",
-      });
-      return;
-    }
+    const cancellationLabels = {
+      CUSTOMER_UNAVAILABLE: "Customer not available",
+      CUSTOMER_REQUESTED: "Customer requested cancellation",
+      ADDRESS_INCORRECT: "Address incorrect or not found",
+      PHONE_UNREACHABLE: "Customer phone unreachable",
+      OTHER: `Other: ${otherCancellationReason ?? ""}`,
+    } as const;
+    const reason =
+      nextStatus === DeliveryStatus.CANCELLED && cancellationReason
+        ? cancellationLabels[cancellationReason]
+        : undefined;
 
     // Safely narrow the route parameter to a string.
     const rawDeliveryId = req.params.id;
@@ -230,114 +234,42 @@ router.patch(
       return;
     }
 
-    const driver = await prisma.driverProfile.findUnique({
-      where: { userId: req.user!.id },
-      select: { id: true },
-    });
+    const result = await updateDeliveryStatusForDriver(
+      deliveryId,
+      req.user!.id,
+      nextStatus,
+      reason
+    );
 
-    if (!driver) {
-      res.status(404).json({
-        success: false,
-        message: "Driver profile not found.",
-      });
-      return;
+    if (
+      result.status === DeliveryStatus.COMPLETED ||
+      result.status === DeliveryStatus.CANCELLED
+    ) {
+      clearLiveLocation(result.id);
     }
 
-    const result = await prisma.$transaction(async (tx) => {
-      const delivery = await tx.delivery.findFirst({
-        where: {
-          id: deliveryId,
-          driverId: driver.id,
-        },
-        include: { order: true },
-      });
-
-      if (!delivery) {
-        throw new Error("DELIVERY_NOT_FOUND");
-      }
-
-      const allowed: Record<DeliveryStatus, DeliveryStatus[]> = {
-        ASSIGNED: [DeliveryStatus.ACCEPTED],
-        ACCEPTED: [DeliveryStatus.PICKED_UP],
-        PICKED_UP: [DeliveryStatus.IN_TRANSIT],
-        IN_TRANSIT: [
-          DeliveryStatus.DELIVERED,
-          DeliveryStatus.FAILED,
-        ],
-        DELIVERED: [],
-        FAILED: [],
-        CANCELLED: [],
-      };
-
-      const target = nextStatus as DeliveryStatus;
-
-      if (!allowed[delivery.status].includes(target)) {
-        throw new Error("INVALID_DELIVERY_TRANSITION");
-      }
-
-      const now = new Date();
-
-      const updated = await tx.delivery.update({
-        where: { id: delivery.id },
-        data: {
-          status: target,
-          ...(target === DeliveryStatus.PICKED_UP
-            ? { pickedUpAt: now }
-            : {}),
-          ...(target === DeliveryStatus.IN_TRANSIT
-            ? { startedAt: now }
-            : {}),
-          ...(target === DeliveryStatus.DELIVERED
-            ? { deliveredAt: now }
-            : {}),
-          ...(target === DeliveryStatus.FAILED
-            ? { failedAt: now, failureReason }
-            : {}),
-        },
-      });
-
-      if (target === DeliveryStatus.IN_TRANSIT) {
-        await tx.order.update({
-          where: { id: delivery.orderId },
-          data: { status: OrderStatus.IN_DELIVERY },
-        });
-      } else if (target === DeliveryStatus.DELIVERED) {
-        await tx.order.update({
-          where: { id: delivery.orderId },
-          data: { status: OrderStatus.DELIVERED },
-        });
-      }
-
-      if (
-        target === DeliveryStatus.DELIVERED ||
-        target === DeliveryStatus.FAILED
-      ) {
-        const remaining = await tx.delivery.count({
-          where: {
-            driverId: driver.id,
-            id: { not: delivery.id },
-            status: { in: activeStatuses },
-          },
-        });
-
-        await tx.driverProfile.update({
-          where: { id: driver.id },
-          data: {
-            availability:
-              remaining === 0
-                ? DriverAvailability.AVAILABLE
-                : DriverAvailability.BUSY,
-          },
-        });
-      } else if (target === DeliveryStatus.ACCEPTED) {
-        await tx.driverProfile.update({
-          where: { id: driver.id },
-          data: { availability: DriverAvailability.BUSY },
-        });
-      }
-
-      return updated;
-    });
+    const notificationType =
+      result.status === DeliveryStatus.STARTED
+        ? NotificationType.DELIVERY_STARTED
+        : result.status === DeliveryStatus.COMPLETED
+          ? NotificationType.DELIVERY_COMPLETED
+          : result.status === DeliveryStatus.CANCELLED
+            ? NotificationType.DELIVERY_CANCELLED
+            : null;
+    if (notificationType) {
+      void sendDeliveryNotification(result.id, notificationType).catch(
+        (error: unknown) => {
+          console.error(
+            JSON.stringify({
+              event: "delivery_notification_failed",
+              deliveryId: result.id,
+              notificationType,
+              errorType: error instanceof Error ? error.name : "unknown",
+            })
+          );
+        }
+      );
+    }
 
     res.json({
       success: true,
@@ -346,10 +278,9 @@ router.patch(
         id: result.id,
         status: result.status,
         startedAt: result.startedAt,
-        pickedUpAt: result.pickedUpAt,
-        deliveredAt: result.deliveredAt,
-        failedAt: result.failedAt,
-        failureReason: result.failureReason,
+        completedAt: result.completedAt,
+        cancelledAt: result.cancelledAt,
+        cancellationReason: result.cancellationReason,
       },
     });
   })
@@ -357,84 +288,117 @@ router.patch(
 
 
 
-const availabilitySchema = z.object({
-  availability: z.enum(["AVAILABLE", "OFFLINE"]),
+const createDriverSchema = z.object({
+  name: z.string().trim().min(2).max(100),
+  email: z.string().trim().email().transform((email) => email.toLowerCase()),
+  phone: z.string().trim().min(7).max(20).optional(),
+  licenseNumber: z.string().trim().max(120).optional(),
+  temporaryPassword: z
+    .string()
+    .min(8)
+    .max(100)
+    .refine(
+      (password) => Buffer.byteLength(password, "utf8") <= 72,
+      "Temporary password must be no more than 72 bytes."
+    ),
 });
-
-router.patch(
-  "/me/availability",
-  authenticate,
-  allowRoles(UserRole.DRIVER),
-  asyncHandler(async (req: AuthenticatedRequest, res) => {
-    const parsed = availabilitySchema.safeParse(req.body);
-
-    if (!parsed.success) {
-      res.status(400).json({
-        success: false,
-        message: "Availability must be AVAILABLE or OFFLINE.",
-      });
-      return;
-    }
-
-    const driver = await prisma.driverProfile.findUnique({
-      where: { userId: req.user!.id },
-    });
-
-    if (!driver) {
-      res.status(404).json({
-        success: false,
-        message: "Driver profile not found.",
-      });
-      return;
-    }
-
-    // Don't let a driver go offline during an active delivery.
-    if (parsed.data.availability === "OFFLINE") {
-      const activeDelivery = await prisma.delivery.findFirst({
-        where: {
-          driverId: driver.id,
-          status: {
-            in: [
-              DeliveryStatus.ASSIGNED,
-              DeliveryStatus.ACCEPTED,
-              DeliveryStatus.PICKED_UP,
-              DeliveryStatus.IN_TRANSIT,
-            ],
-          },
-        },
-      });
-
-      if (activeDelivery) {
-        res.status(409).json({
-          success: false,
-          message:
-            "Complete or resolve your active delivery before going offline.",
-        });
-        return;
-      }
-    }
-
-    const updated = await prisma.driverProfile.update({
-      where: { id: driver.id },
-      data: { availability: parsed.data.availability },
-    });
-
-    res.json({
-      success: true,
-      message: "Availability updated successfully.",
-      data: {
-        availability: updated.availability,
-      },
-    });
-  })
-);
-
-
 
 /**
  * GET /api/drivers
  * List drivers for the owner dashboard.
  */
+router.post(
+  "/",
+  authenticate,
+  allowRoles(UserRole.OWNER),
+  asyncHandler(async (req, res) => {
+    const parsed = createDriverSchema.safeParse(req.body);
+
+    if (!parsed.success) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid driver details.",
+        errors: parsed.error.flatten(),
+      });
+      return;
+    }
+
+    const { name, email, phone, licenseNumber, temporaryPassword } =
+      parsed.data;
+    const existingUser = await prisma.user.findUnique({
+      where: { email },
+      select: { id: true },
+    });
+
+    if (existingUser) {
+      res.status(409).json({
+        success: false,
+        message: "An account with this email already exists.",
+      });
+      return;
+    }
+
+    const passwordHash = await bcrypt.hash(temporaryPassword, 12);
+
+    try {
+      const user = await prisma.$transaction(async (tx) => {
+        return tx.user.create({
+          data: {
+            name,
+            email,
+            phone: phone || null,
+            passwordHash,
+            role: UserRole.DRIVER,
+            driverProfile: {
+              create: {
+                licenseNumber: licenseNumber || null,
+              },
+            },
+          },
+          include: {
+            driverProfile: true,
+          },
+        });
+      });
+
+      if (!user.driverProfile) {
+        throw new Error("Driver profile was not created.");
+      }
+
+      res.status(201).json({
+        success: true,
+        message:
+          "Driver account created successfully. Share the temporary password securely.",
+        data: {
+          driver: {
+            id: user.driverProfile.id,
+            userId: user.id,
+            name: user.name,
+            email: user.email,
+            phone: user.phone,
+            isActive: user.isActive,
+            licenseNumber: user.driverProfile.licenseNumber,
+            createdAt: user.createdAt,
+          },
+        },
+      });
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2002"
+      ) {
+        res.status(409).json({
+          success: false,
+          message: "An account with this email already exists.",
+        });
+        return;
+      }
+
+      throw error;
+    }
+  })
+);
+
 router.get(
   "/",
   authenticate,
@@ -467,7 +431,6 @@ router.get(
         email: driver.user.email,
         phone: driver.user.phone,
         isActive: driver.user.isActive,
-        availability: driver.availability,
         licenseNumber: driver.licenseNumber,
         createdAt: driver.user.createdAt,
       })),

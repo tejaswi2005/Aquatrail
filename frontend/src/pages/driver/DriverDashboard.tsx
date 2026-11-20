@@ -2,7 +2,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  Activity,
   AlertCircle,
   ArrowRight,
   CalendarDays,
@@ -25,18 +24,17 @@ import {
   UserRound,
 } from "lucide-react";
 import { api } from "../../services/api";
+import StatusBadge from "../../components/ui/StatusBadge";
+import DriverLocationShare from "./DriverLocationShare";
 
-type DeliveryStatus =
-  | "ASSIGNED"
-  | "ACCEPTED"
-  | "PICKED_UP"
-  | "IN_TRANSIT"
-  | "DELIVERED"
-  | "FAILED"
-  | "CANCELLED";
-
-type DriverAvailability = "AVAILABLE" | "BUSY" | "OFFLINE";
-type Tab = "dashboard" | "deliveries" | "profile";
+type DeliveryStatus = "PENDING" | "STARTED" | "COMPLETED" | "CANCELLED";
+type Tab = "dashboard" | "deliveries" | "tracking" | "profile";
+type CancellationReason =
+  | "CUSTOMER_UNAVAILABLE"
+  | "CUSTOMER_REQUESTED"
+  | "ADDRESS_INCORRECT"
+  | "PHONE_UNREACHABLE"
+  | "OTHER";
 
 type DriverProfile = {
   id: string;
@@ -46,7 +44,6 @@ type DriverProfile = {
   phone?: string | null;
   role: "DRIVER";
   licenseNumber?: string | null;
-  availability: DriverAvailability;
   isActive: boolean;
   createdAt: string;
 };
@@ -67,16 +64,16 @@ type Delivery = {
   createdAt: string;
   updatedAt: string;
   startedAt?: string | null;
-  pickedUpAt?: string | null;
-  deliveredAt?: string | null;
-  failedAt?: string | null;
-  failureReason?: string | null;
+  completedAt?: string | null;
+  cancelledAt?: string | null;
+  cancellationReason?: string | null;
   order: {
     id: string;
     orderNumber: string;
     status: string;
     totalAmountPaise: number;
     notes?: string | null;
+    scheduledAt?: string | null;
     customer: {
       name: string;
       phone?: string | null;
@@ -101,53 +98,17 @@ type ApiResponse<T> = {
   message?: string;
 };
 
-type UpdateStatus =
-  | "ACCEPTED"
-  | "PICKED_UP"
-  | "IN_TRANSIT"
-  | "DELIVERED"
-  | "FAILED";
+type UpdateStatus = "STARTED" | "COMPLETED" | "CANCELLED";
 
 const activeStatuses: DeliveryStatus[] = [
-  "ASSIGNED",
-  "ACCEPTED",
-  "PICKED_UP",
-  "IN_TRANSIT",
+  "PENDING",
+  "STARTED",
 ];
 
-const statusStyles: Record<DeliveryStatus, string> = {
-  ASSIGNED: "bg-blue-50 text-blue-700 ring-blue-200",
-  ACCEPTED: "bg-violet-50 text-violet-700 ring-violet-200",
-  PICKED_UP: "bg-amber-50 text-amber-700 ring-amber-200",
-  IN_TRANSIT: "bg-cyan-50 text-cyan-700 ring-cyan-200",
-  DELIVERED: "bg-emerald-50 text-emerald-700 ring-emerald-200",
-  FAILED: "bg-rose-50 text-rose-700 ring-rose-200",
-  CANCELLED: "bg-slate-100 text-slate-600 ring-slate-200",
-};
-
 function nextAction(status: DeliveryStatus) {
-  switch (status) {
-    case "ASSIGNED":
-      return {
-        target: "ACCEPTED" as const,
-        label: "Accept delivery",
-        icon: CheckCircle2,
-      };
-    case "ACCEPTED":
-      return {
-        target: "PICKED_UP" as const,
-        label: "Confirm bottle pickup",
-        icon: Package,
-      };
-    case "PICKED_UP":
-      return {
-        target: "IN_TRANSIT" as const,
-        label: "Start trip",
-        icon: Truck,
-      };
-    default:
-      return null;
-  }
+  return status === "PENDING"
+    ? { target: "STARTED" as const, label: "Start delivery", icon: Truck }
+    : null;
 }
 
 function formatDate(value?: string | null) {
@@ -183,28 +144,6 @@ function getInitials(name?: string) {
     .join("");
 }
 
-function availabilityStyle(availability: DriverAvailability) {
-  switch (availability) {
-    case "AVAILABLE":
-      return "bg-emerald-100 text-emerald-800";
-    case "BUSY":
-      return "bg-amber-100 text-amber-800";
-    default:
-      return "bg-slate-100 text-slate-700";
-  }
-}
-
-function availabilityDescription(availability: DriverAvailability) {
-  switch (availability) {
-    case "AVAILABLE":
-      return "You are available to receive deliveries.";
-    case "BUSY":
-      return "You have an active delivery.";
-    default:
-      return "You are offline and cannot receive new deliveries.";
-  }
-}
-
 export default function DriverDashboard() {
   const navigate = useNavigate();
 
@@ -213,26 +152,25 @@ export default function DriverDashboard() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
-  const [updatingAvailability, setUpdatingAvailability] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [showFailureFor, setShowFailureFor] = useState<string | null>(null);
-  const [failureReason, setFailureReason] = useState("");
+  const [showCancellationFor, setShowCancellationFor] = useState<string | null>(null);
+  const [cancellationReason, setCancellationReason] =
+    useState<CancellationReason | "">("");
+  const [otherCancellationReason, setOtherCancellationReason] = useState("");
 
   const [activeTab, setActiveTab] = useState<Tab>("dashboard");
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const [profileDetailsOpen, setProfileDetailsOpen] = useState(false);
   const [previousTab, setPreviousTab] = useState<Tab>("dashboard");
+  const [deliveryFilter, setDeliveryFilter] = useState<
+    "ACTIVE" | "TODAY_COMPLETED" | "TODAY_CANCELLED" | "HISTORY"
+  >("ACTIVE");
 
-  const loadDashboard = useCallback(async (refresh = false) => {
-    setError("");
-
-    if (refresh) setRefreshing(true);
-    else setLoading(true);
-
+  const loadDashboard = useCallback(async () => {
     try {
       const [deliveryResponse, profileResponse] = await Promise.all([
-        api.get<ApiResponse<Delivery[]>>("/deliveries/my"),
+        api.get<ApiResponse<Delivery[]>>("/drivers/my"),
         api.get<ApiResponse<DriverProfile>>("/drivers/me"),
       ]);
 
@@ -256,72 +194,57 @@ export default function DriverDashboard() {
   }, []);
 
   useEffect(() => {
-    void loadDashboard();
-  }, [loadDashboard]);
+    let active = true;
 
-  // Change availability using the authenticated driver's own profile.
-  const handleAvailabilityChange = async () => {
-    if (!driver || updatingAvailability) return;
+    async function fetchDashboard() {
+      try {
+        const [deliveryResponse, profileResponse] = await Promise.all([
+          api.get<ApiResponse<Delivery[]>>("/drivers/my"),
+          api.get<ApiResponse<DriverProfile>>("/drivers/me"),
+        ]);
 
-    if (driver.availability === "BUSY") {
-      setError(
-        "You have an active delivery. Complete or resolve it before changing availability."
-      );
-      return;
-    }
+        if (!Array.isArray(deliveryResponse.data.data)) {
+          throw new Error("Unexpected deliveries response.");
+        }
 
-    const nextAvailability: "AVAILABLE" | "OFFLINE" =
-      driver.availability === "AVAILABLE" ? "OFFLINE" : "AVAILABLE";
+        if (!active) return;
 
-    setUpdatingAvailability(true);
-    setError("");
-    setNotice("");
+        setDeliveries(deliveryResponse.data.data);
+        setDriver(profileResponse.data.data);
+      } catch (err: unknown) {
+        if (!active) return;
 
-    try {
-      const response = await api.patch<
-        ApiResponse<{ availability: DriverAvailability }>
-      >("/drivers/me/availability", {
-        availability: nextAvailability,
-      });
-
-      if (
-        !response.data.success ||
-        !response.data.data?.availability
-      ) {
-        throw new Error(
-          response.data.message || "Unexpected availability response."
+        setError(
+          getErrorMessage(
+            err,
+            "Unable to load your dashboard. Please try again."
+          )
         );
+      } finally {
+        if (active) {
+          setLoading(false);
+          setRefreshing(false);
+        }
       }
-
-      setDriver((current) =>
-        current
-          ? {
-              ...current,
-              availability: response.data.data.availability,
-            }
-          : current
-      );
-
-      setNotice(
-        response.data.message ||
-          `Availability changed to ${response.data.data.availability}.`
-      );
-    } catch (err: unknown) {
-      setError(
-        getErrorMessage(
-          err,
-          "Could not update availability. Please try again."
-        )
-      );
-    } finally {
-      setUpdatingAvailability(false);
     }
-  };
+
+    void fetchDashboard();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  async function refreshDashboard() {
+    setError("");
+    setRefreshing(true);
+    await loadDashboard();
+  }
 
   const updateStatus = async (
     deliveryId: string,
     status: UpdateStatus,
-    reason?: string
+    cancelReason?: CancellationReason
   ) => {
     setUpdatingId(deliveryId);
     setError("");
@@ -330,16 +253,20 @@ export default function DriverDashboard() {
     try {
       const response = await api.patch<
         ApiResponse<{ id: string; status: DeliveryStatus }>
-      >(`/deliveries/${deliveryId}/status`, {
+      >(`/drivers/${deliveryId}/status`, {
         status,
-        ...(reason ? { failureReason: reason } : {}),
+        ...(cancelReason ? { cancellationReason: cancelReason } : {}),
+        ...(cancelReason === "OTHER"
+          ? { otherCancellationReason: otherCancellationReason.trim() }
+          : {}),
       });
 
       setNotice(response.data.message || "Delivery updated successfully.");
-      setShowFailureFor(null);
-      setFailureReason("");
+      setShowCancellationFor(null);
+      setCancellationReason("");
+      setOtherCancellationReason("");
 
-      await loadDashboard(true);
+      await refreshDashboard();
     } catch (err: unknown) {
       setError(
         getErrorMessage(err, "Could not update delivery status.")
@@ -389,25 +316,64 @@ export default function DriverDashboard() {
     activeStatuses.includes(delivery.status)
   );
 
-  const completedCount = deliveries.filter(
-    (delivery) => delivery.status === "DELIVERED"
-  ).length;
-
-  const failedCount = deliveries.filter(
-    (delivery) => delivery.status === "FAILED"
-  ).length;
+  const today = new Date();
+  const todayKey = today.toLocaleDateString();
+  const scheduledToday = deliveries.filter(
+    (delivery) =>
+      new Date(delivery.order.scheduledAt ?? delivery.createdAt).toLocaleDateString() ===
+      todayKey
+  );
+  const upcomingDeliveries = activeDeliveries.filter((delivery) => {
+    if (!delivery.order.scheduledAt) return false;
+    const scheduledAt = new Date(delivery.order.scheduledAt);
+    const todayStart = new Date(today);
+    todayStart.setHours(0, 0, 0, 0);
+    scheduledAt.setHours(0, 0, 0, 0);
+    const daysAhead = (scheduledAt.getTime() - todayStart.getTime()) / 86_400_000;
+    return daysAhead > 0 && daysAhead <= 7;
+  });
+  const completedToday = deliveries.filter(
+    (delivery) =>
+      delivery.status === "COMPLETED" &&
+      delivery.completedAt &&
+      new Date(delivery.completedAt).toLocaleDateString() === todayKey
+  );
+  const cancelledToday = deliveries.filter(
+    (delivery) =>
+      delivery.status === "CANCELLED" &&
+      delivery.cancelledAt &&
+      new Date(delivery.cancelledAt).toLocaleDateString() === todayKey
+  );
+  const visibleDeliveries =
+    deliveryFilter === "ACTIVE"
+      ? activeDeliveries
+      : deliveryFilter === "TODAY_COMPLETED"
+        ? completedToday
+        : deliveryFilter === "TODAY_CANCELLED"
+          ? cancelledToday
+          : deliveries.filter((delivery) =>
+              ["COMPLETED", "CANCELLED"].includes(delivery.status)
+            );
 
   const navigationItems: {
     id: Tab;
     label: string;
     icon: typeof LayoutDashboard;
   }[] = [
-    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+    { id: "dashboard", label: "Home", icon: Home },
     { id: "deliveries", label: "Deliveries", icon: Truck },
+    { id: "tracking", label: "Tracking", icon: MapPin },
+    { id: "profile", label: "Profile", icon: UserRound },
   ];
+  const deliveryFilters = [
+    ["ACTIVE", "Assigned"],
+    ["TODAY_COMPLETED", "Completed today"],
+    ["TODAY_CANCELLED", "Cancelled today"],
+    ["HISTORY", "Past records"],
+  ] as const;
 
   return (
-    <div className="min-h-screen bg-slate-50 pb-20 text-slate-800 md:pb-0">
+    <div className="min-h-screen bg-slate-50 pb-[calc(5rem+env(safe-area-inset-bottom))] text-slate-800 md:pb-0">
       <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 backdrop-blur">
         <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-6 lg:px-8">
           <button
@@ -426,7 +392,10 @@ export default function DriverDashboard() {
             </div>
           </button>
 
-          <nav className="hidden items-center gap-1 md:flex">
+          <nav
+            aria-label="Driver primary navigation"
+            className="hidden items-center gap-1 md:flex"
+          >
             {navigationItems.map((item) => {
               const Icon = item.icon;
 
@@ -435,6 +404,7 @@ export default function DriverDashboard() {
                   key={item.id}
                   type="button"
                   onClick={() => selectTab(item.id)}
+                  aria-current={activeTab === item.id ? "page" : undefined}
                   className={`inline-flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold ${
                     activeTab === item.id
                       ? "bg-sky-50 text-sky-700"
@@ -449,62 +419,9 @@ export default function DriverDashboard() {
           </nav>
 
           <div className="flex items-center gap-2">
-            {/* Quick availability control in the header */}
-            {driver && (
-              <button
-                type="button"
-                onClick={() => void handleAvailabilityChange()}
-                disabled={
-                  loading ||
-                  updatingAvailability ||
-                  driver.availability === "BUSY" ||
-                  !driver.isActive
-                }
-                title={
-                  !driver.isActive
-                    ? "Your account is inactive"
-                    : driver.availability === "BUSY"
-                      ? "Complete your active delivery first"
-                      : driver.availability === "AVAILABLE"
-                        ? "Go offline"
-                        : "Become available for deliveries"
-                }
-                className={`inline-flex items-center gap-2 rounded-xl px-3 py-2.5 text-xs font-bold transition disabled:cursor-not-allowed disabled:opacity-60 sm:text-sm ${
-                  driver.availability === "AVAILABLE"
-                    ? "bg-emerald-50 text-emerald-800 hover:bg-emerald-100"
-                    : driver.availability === "BUSY"
-                      ? "bg-amber-50 text-amber-800"
-                      : "bg-slate-100 text-slate-700 hover:bg-slate-200"
-                }`}
-              >
-                {updatingAvailability ? (
-                  <LoaderCircle size={16} className="animate-spin" />
-                ) : (
-                  <span
-                    className={`h-2 w-2 rounded-full ${
-                      driver.availability === "AVAILABLE"
-                        ? "bg-emerald-500"
-                        : driver.availability === "BUSY"
-                          ? "bg-amber-500"
-                          : "bg-slate-400"
-                    }`}
-                  />
-                )}
-                <span className="hidden sm:inline">
-                  {updatingAvailability
-                    ? "Updating..."
-                    : driver.availability === "AVAILABLE"
-                      ? "Go Offline"
-                      : driver.availability === "BUSY"
-                        ? "Busy"
-                        : "Go Available"}
-                </span>
-              </button>
-            )}
-
             <button
               type="button"
-              onClick={() => void loadDashboard(true)}
+              onClick={() => void refreshDashboard()}
               disabled={loading || refreshing}
               aria-label="Refresh dashboard"
               className="rounded-xl border border-slate-200 p-2.5 hover:bg-slate-50 disabled:opacity-60"
@@ -605,6 +522,43 @@ export default function DriverDashboard() {
           </div>
         )}
 
+        <section
+          aria-label="Live delivery tracking"
+          className={activeTab === "tracking" ? "space-y-4" : "hidden"}
+        >
+          <div>
+            <p className="text-sm font-bold uppercase tracking-widest text-sky-700">
+              Live location
+            </p>
+            <h2 className="mt-1 text-2xl font-extrabold text-slate-900">
+              Tracking
+            </h2>
+            <p className="mt-2 text-sm text-slate-500">
+              Location sharing is available only while a delivery is in progress.
+            </p>
+          </div>
+          {activeDeliveries.filter((delivery) => delivery.status === "STARTED").length === 0 ? (
+            <div className="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-500">
+              No active deliveries to track.
+            </div>
+          ) : (
+            activeDeliveries
+              .filter((delivery) => delivery.status === "STARTED")
+              .map((delivery) => (
+                <div
+                  key={delivery.id}
+                  className="rounded-2xl border border-slate-200 bg-white p-5"
+                >
+                  <h3 className="mb-3 font-bold text-slate-900">
+                    {delivery.order.customer.name} · Order #
+                    {delivery.order.orderNumber}
+                  </h3>
+                  <DriverLocationShare deliveryId={delivery.id} />
+                </div>
+              ))
+          )}
+        </section>
+
         {activeTab === "dashboard" && (
           <>
             <section className="rounded-3xl bg-gradient-to-r from-sky-700 via-sky-600 to-cyan-500 p-6 text-white sm:p-8">
@@ -630,78 +584,37 @@ export default function DriverDashboard() {
                       <p className="font-bold">{driver.name}</p>
                       <p className="text-xs text-sky-100">Driver account</p>
                       <span
-                        className={`mt-1 inline-flex rounded-full px-2 py-1 text-xs font-bold ${availabilityStyle(
-                          driver.availability
-                        )}`}
+                        className="mt-1 inline-flex rounded-full bg-white/20 px-2 py-1 text-xs font-bold"
                       >
-                        {driver.availability}
+                        {driver.isActive ? "ACTIVE ACCOUNT" : "INACTIVE ACCOUNT"}
                       </span>
                     </div>
                   </div>
                 )}
               </div>
 
-              {/* Main availability control */}
-              {driver && (
-                <div className="mt-6 flex flex-col justify-between gap-4 rounded-2xl border border-white/20 bg-white/10 p-4 sm:flex-row sm:items-center">
-                  <div>
-                    <p className="font-bold">Delivery availability</p>
-                    <p className="mt-1 text-sm text-sky-50">
-                      {availabilityDescription(driver.availability)}
-                    </p>
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => void handleAvailabilityChange()}
-                    disabled={
-                      updatingAvailability ||
-                      driver.availability === "BUSY" ||
-                      !driver.isActive
-                    }
-                    className="inline-flex min-w-44 items-center justify-center gap-2 rounded-xl bg-white px-5 py-3 text-sm font-extrabold text-sky-800 shadow-sm transition hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {updatingAvailability ? (
-                      <LoaderCircle size={18} className="animate-spin" />
-                    ) : driver.availability === "AVAILABLE" ? (
-                      <Activity size={18} />
-                    ) : driver.availability === "BUSY" ? (
-                      <Truck size={18} />
-                    ) : (
-                      <CheckCircle2 size={18} />
-                    )}
-                    {updatingAvailability
-                      ? "Updating..."
-                      : driver.availability === "AVAILABLE"
-                        ? "Go Offline"
-                        : driver.availability === "BUSY"
-                          ? "Delivery in progress"
-                          : "Go Available"}
-                  </button>
-                </div>
-              )}
             </section>
 
             <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
               <SummaryCard
-                title="Active deliveries"
-                value={loading ? "—" : activeDeliveries.length}
+                title="Today's scheduled"
+                value={loading ? "—" : scheduledToday.length}
                 icon={<Truck size={21} />}
               />
               <SummaryCard
-                title="Completed deliveries"
-                value={loading ? "—" : completedCount}
+                title="Upcoming · 7 days"
+                value={loading ? "—" : upcomingDeliveries.length}
+                icon={<CalendarDays size={21} />}
+              />
+              <SummaryCard
+                title="Completed today"
+                value={loading ? "—" : completedToday.length}
                 icon={<CheckCircle2 size={21} />}
               />
               <SummaryCard
-                title="Failed deliveries"
-                value={loading ? "—" : failedCount}
+                title="Cancelled today"
+                value={loading ? "—" : cancelledToday.length}
                 icon={<AlertCircle size={21} />}
-              />
-              <SummaryCard
-                title="All assigned"
-                value={loading ? "—" : deliveries.length}
-                icon={<Package size={21} />}
               />
             </section>
 
@@ -709,10 +622,10 @@ export default function DriverDashboard() {
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <h3 className="text-lg font-extrabold text-slate-900">
-                    Recent deliveries
+                    Today's deliveries
                   </h3>
                   <p className="mt-1 text-sm text-slate-500">
-                    Review your latest assigned orders.
+                    Review today's scheduled customer stops.
                   </p>
                 </div>
                 <button
@@ -726,25 +639,30 @@ export default function DriverDashboard() {
 
               {loading ? (
                 <LoadingState />
-              ) : deliveries.length === 0 ? (
-                <EmptyState />
+              ) : scheduledToday.length === 0 ? (
+                <div className="mt-5 rounded-2xl bg-slate-50 p-5 text-sm text-slate-500">
+                  No deliveries scheduled for today.
+                </div>
               ) : (
                 <div className="mt-5 space-y-3">
-                  {deliveries.slice(0, 3).map((delivery) => (
+                  {scheduledToday.slice(0, 5).map((delivery) => (
                     <div
                       key={delivery.id}
                       className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-100 p-4"
                     >
                       <div>
                         <p className="font-bold text-slate-900">
-                          Order #{delivery.order.orderNumber}
-                        </p>
-                        <p className="mt-1 text-sm text-slate-500">
                           {delivery.order.customer.name}
                         </p>
+                        <p className="mt-1 text-sm text-slate-500">
+                          {delivery.order.items.map((item) =>
+                            `${item.product.name} × ${item.quantity}`
+                          ).join(", ")}
+                        </p>
                         <p className="mt-1 text-xs text-slate-400">
-                          {delivery.order.address.city},{" "}
-                          {delivery.order.address.state}
+                          {delivery.order.scheduledAt
+                            ? formatDate(delivery.order.scheduledAt)
+                            : "Time not specified"}
                         </p>
                       </div>
                       <StatusBadge status={delivery.status} />
@@ -766,23 +684,42 @@ export default function DriverDashboard() {
                 My Deliveries
               </h2>
               <p className="mt-2 text-sm text-slate-500">
-                Accept orders, confirm pickup, start your trip, and update
-                the delivery result.
+                Review assigned deliveries and their daily completion history.
               </p>
+            </div>
+
+            <div className="mb-5 flex gap-2 overflow-x-auto pb-2">
+              {deliveryFilters.map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  onClick={() =>
+                    setDeliveryFilter(value)
+                  }
+                  className={`shrink-0 rounded-xl px-4 py-2.5 text-xs font-bold ${
+                    deliveryFilter === value
+                      ? "bg-blue-700 text-white"
+                      : "border border-slate-200 bg-white text-slate-600"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
 
             {loading ? (
               <LoadingState />
-            ) : deliveries.length === 0 ? (
-              <EmptyState />
+            ) : visibleDeliveries.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-10 text-center text-sm text-slate-500">
+                No deliveries in this view.
+              </div>
             ) : (
               <div className="grid gap-5 lg:grid-cols-2">
-                {deliveries.map((delivery) => {
+                {visibleDeliveries.map((delivery) => {
                   const action = nextAction(delivery.status);
                   const ActionIcon = action?.icon;
                   const address = delivery.order.address;
                   const isUpdating = updatingId === delivery.id;
-                  const showFailureForm = showFailureFor === delivery.id;
 
                   return (
                     <article
@@ -798,7 +735,10 @@ export default function DriverDashboard() {
                             #{delivery.order.orderNumber}
                           </h3>
                           <p className="mt-1 text-xs text-slate-500">
-                            Updated {formatDate(delivery.updatedAt)}
+                            Scheduled{" "}
+                            {formatDate(
+                              delivery.order.scheduledAt ?? delivery.createdAt
+                            )}
                           </p>
                         </div>
                         <StatusBadge status={delivery.status} />
@@ -844,11 +784,6 @@ export default function DriverDashboard() {
                               {delivery.order.customer.phone}
                             </a>
                           )}
-                          {delivery.order.customer.email && (
-                            <p className="mt-1 break-all text-sm text-slate-500">
-                              {delivery.order.customer.email}
-                            </p>
-                          )}
                         </div>
 
                         <div className="rounded-2xl border border-slate-100 p-4">
@@ -889,16 +824,15 @@ export default function DriverDashboard() {
                         <div className="flex items-start gap-2 text-xs text-slate-500">
                           <Clock size={15} className="mt-0.5 shrink-0" />
                           <div>
-                            <p>Picked up: {formatDate(delivery.pickedUpAt)}</p>
-                            <p>Trip started: {formatDate(delivery.startedAt)}</p>
-                            <p>Delivered: {formatDate(delivery.deliveredAt)}</p>
+                            <p>Started: {formatDate(delivery.startedAt)}</p>
+                            <p>Completed: {formatDate(delivery.completedAt)}</p>
+                            <p>Cancelled: {formatDate(delivery.cancelledAt)}</p>
                           </div>
                         </div>
 
-                        {delivery.status === "FAILED" && (
-                          <p className="rounded-xl bg-rose-50 p-3 text-sm text-rose-700">
-                            <strong>Failure reason:</strong>{" "}
-                            {delivery.failureReason || "Not provided"}
+                        {delivery.order.scheduledAt && (
+                          <p className="rounded-xl bg-sky-50 p-3 text-sm text-sky-800">
+                            Scheduled: {formatDate(delivery.order.scheduledAt)}
                           </p>
                         )}
 
@@ -925,14 +859,20 @@ export default function DriverDashboard() {
                           </div>
                         )}
 
-                        {delivery.status === "IN_TRANSIT" && (
+                        {delivery.status === "STARTED" && (
                           <div className="space-y-3 border-t border-slate-100 pt-4">
                             <button
                               type="button"
                               disabled={isUpdating}
-                              onClick={() =>
-                                void updateStatus(delivery.id, "DELIVERED")
-                              }
+                              onClick={() => {
+                                if (
+                                  window.confirm(
+                                    "Confirm that this delivery has been completed?"
+                                  )
+                                ) {
+                                  void updateStatus(delivery.id, "COMPLETED");
+                                }
+                              }}
                               className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-3 text-sm font-bold text-white hover:bg-emerald-700 disabled:opacity-60"
                             >
                               {isUpdating ? (
@@ -945,67 +885,106 @@ export default function DriverDashboard() {
                               )}
                               {isUpdating ? "Updating..." : "Mark delivered"}
                             </button>
+                          </div>
+                        )}
 
+                        {activeStatuses.includes(delivery.status) && (
+                          <div className="border-t border-slate-100 pt-4">
                             <button
                               type="button"
                               disabled={isUpdating}
                               onClick={() => {
-                                setShowFailureFor(
-                                  showFailureForm ? null : delivery.id
+                                setShowCancellationFor(
+                                  showCancellationFor === delivery.id
+                                    ? null
+                                    : delivery.id
                                 );
-                                setFailureReason("");
+                                setCancellationReason("");
+                                setOtherCancellationReason("");
                               }}
                               className="w-full rounded-xl border border-rose-200 px-4 py-3 text-sm font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-60"
                             >
-                              {showFailureForm
-                                ? "Cancel failure report"
-                                : "Report failed delivery"}
+                              {showCancellationFor === delivery.id
+                                ? "Close cancellation"
+                                : "Cancel delivery"}
                             </button>
-
-                            {showFailureForm && (
-                              <div className="space-y-3 rounded-xl border border-rose-100 bg-rose-50/50 p-4">
+                            {showCancellationFor === delivery.id && (
+                              <div className="mt-3 space-y-3 rounded-xl border border-rose-100 bg-rose-50/50 p-4">
                                 <label
-                                  htmlFor={`failure-${delivery.id}`}
+                                  htmlFor={`cancel-reason-${delivery.id}`}
                                   className="block text-sm font-semibold text-slate-700"
                                 >
-                                  Reason for failed delivery
+                                  Cancellation reason
                                 </label>
-                                <textarea
-                                  id={`failure-${delivery.id}`}
-                                  value={failureReason}
+                                <select
+                                  id={`cancel-reason-${delivery.id}`}
+                                  value={cancellationReason}
                                   onChange={(event) =>
-                                    setFailureReason(event.target.value)
+                                    setCancellationReason(
+                                      event.target.value as CancellationReason | ""
+                                    )
                                   }
-                                  maxLength={500}
-                                  rows={3}
-                                  placeholder="Explain why the order could not be delivered..."
-                                  className="w-full rounded-xl border border-slate-200 bg-white p-3 text-sm outline-none focus:border-rose-400"
-                                />
+                                  className="w-full rounded-xl border border-slate-200 bg-white p-3 text-sm"
+                                >
+                                  <option value="">Select a reason</option>
+                                  <option value="CUSTOMER_UNAVAILABLE">
+                                    Customer not available
+                                  </option>
+                                  <option value="CUSTOMER_REQUESTED">
+                                    Customer requested cancellation
+                                  </option>
+                                  <option value="ADDRESS_INCORRECT">
+                                    Address incorrect or not found
+                                  </option>
+                                  <option value="PHONE_UNREACHABLE">
+                                    Customer phone unreachable
+                                  </option>
+                                  <option value="OTHER">Other</option>
+                                </select>
+                                {cancellationReason === "OTHER" && (
+                                  <label className="block text-sm font-semibold text-slate-700">
+                                    Explanation
+                                    <textarea
+                                      value={otherCancellationReason}
+                                      onChange={(event) =>
+                                        setOtherCancellationReason(
+                                          event.target.value
+                                        )
+                                      }
+                                      maxLength={200}
+                                      rows={2}
+                                      className="mt-2 w-full rounded-xl border border-slate-200 bg-white p-3 text-sm font-normal"
+                                      placeholder="Briefly explain the reason"
+                                    />
+                                  </label>
+                                )}
                                 <button
                                   type="button"
                                   disabled={
                                     isUpdating ||
-                                    failureReason.trim().length < 3
+                                    !cancellationReason ||
+                                    (cancellationReason === "OTHER" &&
+                                      otherCancellationReason.trim().length < 3)
                                   }
                                   onClick={() =>
                                     void updateStatus(
                                       delivery.id,
-                                      "FAILED",
-                                      failureReason.trim()
+                                      "CANCELLED",
+                                      cancellationReason || undefined
                                     )
                                   }
                                   className="w-full rounded-xl bg-rose-600 px-4 py-3 text-sm font-bold text-white hover:bg-rose-700 disabled:opacity-50"
                                 >
                                   {isUpdating
-                                    ? "Submitting..."
-                                    : "Confirm failed delivery"}
+                                    ? "Cancelling..."
+                                    : "Confirm cancellation"}
                                 </button>
                               </div>
                             )}
                           </div>
                         )}
 
-                        {delivery.status === "DELIVERED" && (
+                        {delivery.status === "COMPLETED" && (
                           <div className="flex items-center gap-2 rounded-xl bg-emerald-50 p-3 text-sm font-semibold text-emerald-700">
                             <CheckCircle2 size={18} />
                             Delivery completed successfully.
@@ -1014,7 +993,10 @@ export default function DriverDashboard() {
 
                         {delivery.status === "CANCELLED" && (
                           <p className="rounded-xl bg-slate-100 p-3 text-sm text-slate-600">
-                            This delivery has been cancelled.
+                            This delivery was cancelled{" "}
+                            {delivery.cancellationReason
+                              ? `— ${delivery.cancellationReason}`
+                              : ""}
                           </p>
                         )}
                       </div>
@@ -1061,7 +1043,7 @@ export default function DriverDashboard() {
                           Personal details
                         </span>
                         <span className="mt-1 block text-sm text-slate-500">
-                          Name, contact, license and availability
+                          Name, contact and license
                         </span>
                       </span>
                     </span>
@@ -1141,11 +1123,6 @@ export default function DriverDashboard() {
                         value={driver.licenseNumber || "Not provided"}
                       />
                       <ProfileField
-                        icon={<Activity size={19} />}
-                        label="Account availability"
-                        value={driver.availability.replace(/_/g, " ")}
-                      />
-                      <ProfileField
                         icon={<CalendarDays size={19} />}
                         label="Account created"
                         value={formatDate(driver.createdAt)}
@@ -1162,57 +1139,10 @@ export default function DriverDashboard() {
                       />
                     </div>
 
-                    {/* Availability control in My Profile */}
                     <div className="border-t border-slate-100 p-5 sm:p-7">
-                      <div className="flex flex-col justify-between gap-4 rounded-2xl bg-slate-50 p-4 sm:flex-row sm:items-center">
-                        <div>
-                          <p className="font-bold text-slate-900">
-                            Delivery availability
-                          </p>
-                          <p className="mt-1 text-sm text-slate-500">
-                            {availabilityDescription(driver.availability)}
-                          </p>
-                          <span
-                            className={`mt-2 inline-flex rounded-full px-3 py-1 text-xs font-bold ${availabilityStyle(
-                              driver.availability
-                            )}`}
-                          >
-                            {driver.availability}
-                          </span>
-                        </div>
-
-                        <button
-                          type="button"
-                          onClick={() => void handleAvailabilityChange()}
-                          disabled={
-                            updatingAvailability ||
-                            driver.availability === "BUSY" ||
-                            !driver.isActive
-                          }
-                          className="inline-flex items-center justify-center gap-2 rounded-xl bg-sky-600 px-5 py-3 text-sm font-bold text-white hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
-                        >
-                          {updatingAvailability ? (
-                            <LoaderCircle
-                              size={17}
-                              className="animate-spin"
-                            />
-                          ) : (
-                            <Activity size={17} />
-                          )}
-                          {updatingAvailability
-                            ? "Updating..."
-                            : driver.availability === "AVAILABLE"
-                              ? "Go Offline"
-                              : driver.availability === "BUSY"
-                                ? "Delivery in progress"
-                                : "Go Available"}
-                        </button>
-                      </div>
-
                       <p className="mt-4 text-sm leading-6 text-slate-500">
                         Contact the shop owner to change your registered
-                        account details. Availability can be managed here
-                        when you are not on an active delivery.
+                        account details.
                       </p>
 
                       <button
@@ -1233,11 +1163,14 @@ export default function DriverDashboard() {
       </main>
 
       {/* Persistent bottom navigation for mobile */}
-      <nav className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200 bg-white/95 pb-[env(safe-area-inset-bottom)] backdrop-blur md:hidden">
-        <div className="mx-auto grid max-w-lg grid-cols-3">
+      <nav
+        aria-label="Driver primary navigation"
+        className="fixed inset-x-0 bottom-0 z-40 border-t border-slate-200 bg-white/95 pb-[max(0.65rem,env(safe-area-inset-bottom))] pt-1 backdrop-blur md:hidden"
+      >
+        <div className="mx-auto grid max-w-lg grid-cols-4">
           <BottomNavButton
-            label="Dashboard"
-            icon={<LayoutDashboard size={21} />}
+            label="Home"
+            icon={<Home size={21} />}
             active={activeTab === "dashboard"}
             onClick={() => selectTab("dashboard")}
           />
@@ -1246,6 +1179,12 @@ export default function DriverDashboard() {
             icon={<Truck size={21} />}
             active={activeTab === "deliveries"}
             onClick={() => selectTab("deliveries")}
+          />
+          <BottomNavButton
+            label="Tracking"
+            icon={<MapPin size={21} />}
+            active={activeTab === "tracking"}
+            onClick={() => selectTab("tracking")}
           />
           <BottomNavButton
             label="Profile"
@@ -1280,6 +1219,7 @@ function BottomNavButton({
     <button
       type="button"
       onClick={onClick}
+      aria-current={active ? "page" : undefined}
       className={`relative flex min-h-16 flex-col items-center justify-center gap-1 text-xs font-semibold ${
         active ? "text-sky-700" : "text-slate-500 hover:text-slate-800"
       }`}
@@ -1290,16 +1230,6 @@ function BottomNavButton({
         <span className="absolute bottom-0 h-0.5 w-10 rounded-full bg-sky-600" />
       )}
     </button>
-  );
-}
-
-function StatusBadge({ status }: { status: DeliveryStatus }) {
-  return (
-    <span
-      className={`inline-flex shrink-0 rounded-full px-3 py-1.5 text-xs font-bold ring-1 ring-inset ${statusStyles[status]}`}
-    >
-      {status.replace(/_/g, " ")}
-    </span>
   );
 }
 
@@ -1356,22 +1286,6 @@ function LoadingState() {
     <div className="flex min-h-48 items-center justify-center gap-3 rounded-3xl border border-slate-200 bg-white text-sm text-slate-500">
       <LoaderCircle size={22} className="animate-spin text-sky-600" />
       Loading...
-    </div>
-  );
-}
-
-function EmptyState() {
-  return (
-    <div className="flex min-h-56 flex-col items-center justify-center rounded-3xl border border-slate-200 bg-white p-6 text-center">
-      <div className="rounded-2xl bg-sky-50 p-4 text-sky-600">
-        <Home size={30} />
-      </div>
-      <h3 className="mt-4 text-lg font-bold text-slate-900">
-        No deliveries assigned
-      </h3>
-      <p className="mt-1 max-w-md text-sm text-slate-500">
-        When the owner assigns a delivery to your account, it will appear here.
-      </p>
     </div>
   );
 }

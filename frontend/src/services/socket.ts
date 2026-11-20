@@ -4,13 +4,17 @@ import { getAccessToken } from "./auth";
 const socketUrl =
   import.meta.env.VITE_SOCKET_URL || "http://localhost:5000";
 
-export const socket = io(socketUrl, {
-  autoConnect: false,
-  transports: ["websocket", "polling"],
+export function createAuthenticatedSocket() {
+  return io(socketUrl, {
+    autoConnect: false,
+    transports: ["websocket", "polling"],
 
-  auth: (callback) => {
-    callback({
-      token: getAccessToken(),
-    });
-  },
-});
+    auth: (callback) => {
+      callback({
+        token: getAccessToken(),
+      });
+    },
+  });
+}
+
+export const socket = createAuthenticatedSocket();
